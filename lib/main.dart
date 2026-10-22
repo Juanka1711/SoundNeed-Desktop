@@ -8,13 +8,28 @@ import 'package:crypto/crypto.dart';
 import 'package:file_selector/file_selector.dart';
 import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show MethodChannel;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
-const _bg = Color(0xFF0B0B12);
+import 'pages/albums_page.dart';
+import 'pages/artists_page.dart';
+import 'pages/favorites_page.dart';
+import 'pages/home_page.dart';
+import 'pages/music_page.dart';
+import 'pages/playlists_page.dart';
+import 'widgets/library_content.dart';
+import 'widgets/middle_content_panel.dart';
+import 'widgets/mini_player.dart';
+import 'widgets/now_playing_panel.dart';
+import 'widgets/online_search_results.dart';
+import 'widgets/soundneed_sidebar.dart';
+import 'widgets/soundneed_top_bar.dart';
+
+const _bg = Color(0xFF000000);
 const _panel = Color(0xFF151522);
 const _raised = Color(0xFF1D1D2B);
 const _cyan = Color(0xFF83E8FF);
@@ -22,6 +37,7 @@ const _muted = Color(0xFF9292A5);
 const _youtubeAndroidUserAgent =
     'Mozilla/5.0 (Linux; Android 15) AppleWebKit/537.36 '
     '(KHTML, like Gecko) Chrome/140.0 Mobile Safari/537.36';
+const _windowChannel = MethodChannel('soundneed/window');
 const _audioExtensions = <String>[
   'mp3',
   'flac',
@@ -229,8 +245,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _scanning = false;
   bool _queueOpen = false;
   bool _onlineMode = false;
+  bool _loopEnabled = false;
   bool _onlineSearching = false;
   bool _onlinePlaybackLoading = false;
+  bool _windowMaximized = Platform.isWindows;
   String? _error;
   String? _onlineError;
   _OnlineTrack? _playingOnlineTrack;
@@ -284,6 +302,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (state.processingState == ProcessingState.completed &&
           _playingOnlineTrack != null) {
         unawaited(_skipOnlineTrack(1));
+      }
+    });
+  }
+
+  Future<void> _toggleWindowMaximize() async {
+    final maximized = await _windowChannel.invokeMethod<bool>('toggleMaximize');
+    if (mounted && maximized != null) {
+      setState(() => _windowMaximized = maximized);
+    }
+  }
+
+  void _navigate(String label) {
+    setState(() {
+      if (_playlists.containsKey(label)) {
+        _section = 'Playlists';
+        _playlistView = label;
+      } else {
+        _section = label;
+        _playlistView = null;
       }
     });
   }
@@ -626,26 +663,37 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   void _onSearchChanged(String value) {
-    setState(() => _query = value);
-    if (_section != 'Buscar' || !_onlineMode) return;
+    final query = value.trim();
+    setState(() {
+      _query = value;
+      if (query.isNotEmpty) {
+        _section = 'Buscar';
+        _playlistView = null;
+      } else if (_section == 'Buscar') {
+        _section = 'Inicio';
+      }
+    });
     _onlineDebounce?.cancel();
     final requestId = ++_onlineRequestId;
-    if (value.trim().isEmpty) {
+    if (_section != 'Buscar' || query.isEmpty) {
       setState(() {
         _onlineResults = const [];
         _onlineSearching = false;
         _onlineError = null;
+        _onlineMode = false;
       });
       return;
     }
+
     setState(() {
       _onlineResults = const [];
       _onlineSearching = true;
       _onlineError = null;
+      _onlineMode = true;
     });
     _onlineDebounce = Timer(
       const Duration(milliseconds: 650),
-      () => _searchOnline(value, requestId),
+      () => _searchOnline(query, requestId),
     );
   }
 
@@ -680,24 +728,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
         _onlineSearching = false;
         _onlineError = 'No se pudo buscar en YouTube. Comprueba tu conexión e inténtalo de nuevo.';
       });
-    }
-  }
-
-  void _setOnlineMode(bool online) {
-    setState(() {
-      _onlineMode = online;
-      _onlineResults = const [];
-      _onlineError = null;
-      _onlineSearching = false;
-    });
-    _onlineDebounce?.cancel();
-    final requestId = ++_onlineRequestId;
-    if (online && _query.trim().isNotEmpty) {
-      setState(() => _onlineSearching = true);
-      _onlineDebounce = Timer(
-        const Duration(milliseconds: 150),
-        () => _searchOnline(_query, requestId),
-      );
     }
   }
 
@@ -1151,23 +1181,118 @@ class _LibraryScreenState extends State<LibraryScreen> {
               .firstOrNull
         : null;
     return Scaffold(
+      backgroundColor: _bg,
       body: LayoutBuilder(
         builder: (context, constraints) {
           final compact = constraints.maxWidth < 850;
-          return Row(
+          // Windows scaling can make a 1920 px display report only about
+          // 1280 logical pixels, so show the third panel at this breakpoint.
+          final showNowPlaying =
+              constraints.maxWidth >= 1150 &&
+              (current != null || _playingOnlineTrack != null);
+          return Column(
             children: [
-              _sidebar(compact),
+              SoundNeedTopBar(
+                compact: compact,
+                section: _section,
+                query: _query,
+                searchController: _search,
+                onSearchChanged: _onSearchChanged,
+                scanning: _scanning,
+                onlineMode: _onlineMode,
+                maximized: _windowMaximized,
+                backgroundColor: _bg,
+                surfaceColor: _raised,
+                accentColor: _cyan,
+                mutedColor: _muted,
+                onHome: () => setState(() {
+                  _section = 'Inicio';
+                  _playlistView = null;
+                }),
+                onImportFiles: () => unawaited(_importFiles()),
+                onImportFolder: () => unawaited(_importFolder()),
+                onMinimize: () =>
+                    unawaited(_windowChannel.invokeMethod<void>('minimize')),
+                onToggleMaximize: () => unawaited(_toggleWindowMaximize()),
+                onClose: () =>
+                    unawaited(_windowChannel.invokeMethod<void>('close')),
+                onDragWindow: () =>
+                    unawaited(_windowChannel.invokeMethod<void>('drag')),
+              ),
               Expanded(
-                child: Column(
-                  children: [
-                    _topBar(compact),
-                    Expanded(child: _mainContent(compact)),
-                    _playerBar(
-                      current,
-                      compact,
-                      onlineTrack: _playingOnlineTrack,
-                    ),
-                  ],
+                child: ColoredBox(
+                  color: Colors.black,
+                  child: Column(
+                    children: [
+                      Expanded(
+                        child: Row(
+                          crossAxisAlignment: CrossAxisAlignment.stretch,
+                          children: [
+                            SoundNeedSidebar(
+                              compact: compact,
+                              section: _section,
+                              playlistView: _playlistView,
+                              playlistNames: _playlists.keys.toList(),
+                              panelColor: _panel,
+                              accentColor: _cyan,
+                              mutedColor: _muted,
+                              onNavigate: _navigate,
+                            ),
+                            Expanded(
+                              child: _mainContent(compact, showNowPlaying),
+                            ),
+                            AnimatedContainer(
+                              duration: const Duration(milliseconds: 380),
+                              curve: Curves.easeInOutCubic,
+                              width: showNowPlaying ? 326 : 0,
+                              child: ClipRect(
+                                child: SizedBox(
+                                  width: 326,
+                                  child: Padding(
+                                    padding: const EdgeInsets.symmetric(
+                                      horizontal: 13,
+                                    ),
+                                    child: AnimatedSlide(
+                                      duration: const Duration(
+                                        milliseconds: 380,
+                                      ),
+                                      curve: Curves.easeInOutCubic,
+                                      offset: showNowPlaying
+                                          ? Offset.zero
+                                          : const Offset(.08, 0),
+                                      child: AnimatedOpacity(
+                                        duration: const Duration(
+                                          milliseconds: 260,
+                                        ),
+                                        curve: Curves.easeOut,
+                                        opacity: showNowPlaying ? 1 : 0,
+                                        child: SizedBox(
+                                          width: 300,
+                                          child: _nowPlayingPanel(current),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Padding(
+                        padding: EdgeInsets.fromLTRB(
+                          compact ? 4 : 10,
+                          12,
+                          compact ? 4 : 10,
+                          12,
+                        ),
+                        child: ClipRRect(
+                          borderRadius: BorderRadius.circular(26),
+                          child: _miniPlayer(current, compact),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ],
@@ -1177,367 +1302,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _sidebar(bool compact) => Container(
-    width: compact ? 76 : 236,
-    color: _panel,
-    padding: EdgeInsets.symmetric(horizontal: compact ? 12 : 18, vertical: 22),
-    child: Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Padding(
-          padding: EdgeInsets.only(left: compact ? 5 : 10, bottom: 34),
-          child: Row(
-            children: [
-              Container(
-                width: 34,
-                height: 34,
-                decoration: BoxDecoration(
-                  color: _cyan,
-                  borderRadius: BorderRadius.circular(11),
-                ),
-                child: const Icon(
-                  Icons.graphic_eq_rounded,
-                  color: _bg,
-                  size: 22,
-                ),
-              ),
-              if (!compact) ...[
-                const SizedBox(width: 11),
-                const Text(
-                  'SoundNeed',
-                  style: TextStyle(
-                    fontSize: 20,
-                    fontWeight: FontWeight.w700,
-                    letterSpacing: -.6,
-                  ),
-                ),
-              ],
-            ],
-          ),
-        ),
-        _navItem(Icons.home_rounded, 'Inicio', compact),
-        _navItem(Icons.search_rounded, 'Buscar', compact),
-        _navItem(Icons.library_music_rounded, 'Tu música', compact),
-        _navItem(Icons.favorite_rounded, 'Favoritos', compact),
-        const SizedBox(height: 25),
-        if (!compact)
-          Padding(
-            padding: const EdgeInsets.only(left: 12, bottom: 12),
-            child: Text(
-              'COLECCIÓN',
-              style: TextStyle(
-                color: _muted.withValues(alpha: .8),
-                fontSize: 10,
-                letterSpacing: 1.5,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ),
-        _navItem(Icons.album_rounded, 'Álbumes', compact),
-        _navItem(Icons.people_alt_rounded, 'Artistas', compact),
-        _navItem(Icons.queue_music_rounded, 'Playlists', compact),
-        if (_section == 'Playlists' && !compact)
-          ..._playlists.keys.map(
-            (name) => Padding(
-              padding: const EdgeInsets.only(left: 38),
-              child: _navItem(Icons.circle, name, compact, small: true),
-            ),
-          ),
-        const Spacer(),
-        _navItem(Icons.settings_outlined, 'Ajustes', compact),
-        if (!compact)
-          const Padding(
-            padding: EdgeInsets.only(left: 12, top: 10),
-            child: Text(
-              'MÚSICA, A TU MANERA',
-              style: TextStyle(
-                color: Color(0xFF5D5D70),
-                fontSize: 9,
-                letterSpacing: 1.2,
-              ),
-            ),
-          ),
-      ],
-    ),
-  );
-
-  Widget _navItem(
-    IconData icon,
-    String label,
-    bool compact, {
-    bool small = false,
-  }) {
-    final selected =
-        _section == label ||
-        (_section == 'Playlists' && label == _playlistView);
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 4),
-      child: Tooltip(
-        message: compact ? label : '',
-        child: InkWell(
-          borderRadius: BorderRadius.circular(10),
-          onTap: () {
-            setState(() {
-              if (_playlists.containsKey(label)) {
-                _section = 'Playlists';
-                _playlistView = label;
-              } else {
-                _section = label;
-                _playlistView = null;
-              }
-              if (label == 'Buscar')
-                FocusScope.of(context).requestFocus(FocusNode());
-            });
-          },
-          child: Container(
-            height: small ? 34 : 42,
-            padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 12),
-            decoration: BoxDecoration(
-              color: selected
-                  ? _cyan.withValues(alpha: .11)
-                  : Colors.transparent,
-              borderRadius: BorderRadius.circular(10),
-            ),
-            child: Row(
-              mainAxisAlignment: compact
-                  ? MainAxisAlignment.center
-                  : MainAxisAlignment.start,
-              children: [
-                Icon(
-                  icon,
-                  size: small ? 13 : 19,
-                  color: selected ? _cyan : _muted,
-                ),
-                if (!compact) ...[
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Text(
-                      label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                      style: TextStyle(
-                        fontSize: small ? 12 : 13,
-                        color: selected ? Colors.white : _muted,
-                        fontWeight: selected
-                            ? FontWeight.w600
-                            : FontWeight.w400,
-                      ),
-                    ),
-                  ),
-                ],
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _topBar(bool compact) => Container(
-    height: 76,
-    padding: EdgeInsets.symmetric(horizontal: compact ? 20 : 34),
-    decoration: BoxDecoration(
-      border: Border(
-        bottom: BorderSide(color: Colors.white.withValues(alpha: .04)),
-      ),
-    ),
-    child: Row(
-      children: [
-        if (_section == 'Buscar')
-          Expanded(child: _searchField())
-        else
-          const Spacer(),
-        if (_section != 'Buscar')
-          SizedBox(width: compact ? 150 : 290, child: _searchField()),
-        const SizedBox(width: 14),
-        if (!compact)
-          Text(
-            _scanning
-                ? 'Analizando archivos…'
-                : _section == 'Buscar' && _onlineMode
-                ? 'Búsqueda online · YouTube'
-                : 'Biblioteca local',
-            style: const TextStyle(color: _muted, fontSize: 12),
-          ),
-        const SizedBox(width: 12),
-        IconButton(
-          tooltip: 'Importar canciones',
-          onPressed: _scanning ? null : _importFiles,
-          icon: const Icon(Icons.audio_file_outlined, color: _cyan),
-        ),
-        IconButton(
-          tooltip: 'Importar carpeta',
-          onPressed: _scanning ? null : _importFolder,
-          icon: const Icon(Icons.create_new_folder_outlined, color: _cyan),
-        ),
-      ],
-    ),
-  );
-
-  Widget _searchField() => TextField(
-    controller: _search,
-    onChanged: _onSearchChanged,
-    style: const TextStyle(fontSize: 13),
-    decoration: InputDecoration(
-      hintText: 'Buscar canciones o artistas',
-      hintStyle: const TextStyle(color: _muted, fontSize: 12),
-      prefixIcon: const Icon(Icons.search, size: 18, color: _muted),
-      suffixIcon: _query.isEmpty
-          ? null
-          : IconButton(
-              icon: const Icon(Icons.close, size: 16),
-              onPressed: () {
-                _search.clear();
-                _onSearchChanged('');
-              },
-            ),
-      filled: true,
-      fillColor: _raised,
-      contentPadding: const EdgeInsets.symmetric(vertical: 10),
-      border: OutlineInputBorder(
-        borderRadius: BorderRadius.circular(12),
-        borderSide: BorderSide.none,
-      ),
-    ),
-  );
-
-  Widget _mainContent(bool compact) {
+  Widget _mainContent(bool compact, bool hasNowPlayingPanel) {
     final tracks = _visibleTracks;
     final title = _section == 'Playlists' && _playlistView != null
         ? _playlistView!
         : _section;
-    return Stack(
-      children: [
-        ListView(
-          padding: EdgeInsets.fromLTRB(
-            compact ? 22 : 38,
-            30,
-            compact ? 22 : 38,
-            28,
-          ),
-          children: [
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        _section == 'Inicio'
-                            ? 'TU ESPACIO MUSICAL'
-                            : 'SOUNDNEED  /  ${_section.toUpperCase()}',
-                        style: const TextStyle(
-                          color: _cyan,
-                          fontSize: 10,
-                          letterSpacing: 1.8,
-                          fontWeight: FontWeight.w700,
-                        ),
-                      ),
-                      const SizedBox(height: 9),
-                      Text(
-                        title,
-                        style: TextStyle(
-                          fontSize: compact ? 29 : 36,
-                          fontWeight: FontWeight.w700,
-                          letterSpacing: -1.2,
-                        ),
-                      ),
-                      const SizedBox(height: 5),
-                      Text(
-                        _section == 'Buscar' && _onlineMode
-                            ? 'Resultados de YouTube · reproduce audio en SoundNeed'
-                            : '${tracks.length} canciones en tu biblioteca',
-                        style: const TextStyle(color: _muted, fontSize: 12),
-                      ),
-                    ],
-                  ),
-                ),
-                if (_section == 'Playlists')
-                  IconButton(
-                    tooltip: 'Crear playlist',
-                    onPressed: _createPlaylist,
-                    icon: const Icon(Icons.add_circle_outline, color: _cyan),
-                  ),
-              ],
+    final Widget body = _loading
+        ? const Center(
+            child: Padding(
+              padding: EdgeInsets.all(64),
+              child: CircularProgressIndicator(color: _cyan),
             ),
-            if (_section == 'Buscar') ...[
-              const SizedBox(height: 20),
-              Align(
-                alignment: Alignment.centerLeft,
-                child: SegmentedButton<bool>(
-                  showSelectedIcon: false,
-                  segments: const [
-                    ButtonSegment(
-                      value: false,
-                      icon: Icon(Icons.library_music_outlined, size: 16),
-                      label: Text('Tu música'),
-                    ),
-                    ButtonSegment(
-                      value: true,
-                      icon: Icon(Icons.public, size: 16),
-                      label: Text('Buscar online'),
-                    ),
-                  ],
-                  selected: {_onlineMode},
-                  onSelectionChanged: (selection) =>
-                      _setOnlineMode(selection.first),
-                ),
-              ),
-            ],
-            const SizedBox(height: 28),
-            if (_loading)
-              const Center(
-                child: Padding(
-                  padding: EdgeInsets.all(64),
-                  child: CircularProgressIndicator(color: _cyan),
-                ),
-              )
-            else if (_section == 'Ajustes')
-              _settingsPanel()
-            else if (_section == 'Álbumes' || _section == 'Artistas')
-              _notAvailable(
-                '$title agrupados',
-                'La biblioteca ya lee álbum y artista de los metadatos. La vista agrupada estará disponible en una actualización futura.',
-              )
-            else if (_section == 'Buscar' && _onlineMode)
-              _onlineSearchPanel()
-            else if (tracks.isEmpty)
-              _emptyState()
-            else
-              _trackTable(tracks, compact),
-            const SizedBox(height: 95),
-          ],
-        ),
-        if (_error != null)
-          Positioned(
-            left: 20,
-            right: 20,
-            bottom: 14,
-            child: Material(
-              color: const Color(0xFF512C36),
-              borderRadius: BorderRadius.circular(12),
-              child: ListTile(
-                dense: true,
-                leading: const Icon(Icons.error_outline, color: Colors.white),
-                title: Text(_error!, style: const TextStyle(fontSize: 12)),
-                trailing: IconButton(
-                  onPressed: () => setState(() => _error = null),
-                  icon: const Icon(Icons.close),
-                ),
-              ),
-            ),
-          ),
-        if (_queueOpen)
-          Positioned(
-            top: 14,
-            right: 16,
-            bottom: 14,
-            width: 310,
-            child: _queuePanel(),
-          ),
-      ],
+          )
+        : _section == 'Álbumes' || _section == 'Artistas'
+        ? _notAvailable(
+            '$title agrupados',
+            'La biblioteca ya lee álbum y artista de los metadatos. La vista agrupada estará disponible en una actualización futura.',
+          )
+        : _section == 'Buscar'
+        ? _searchResultsPanel(tracks, compact)
+        : tracks.isEmpty
+        ? _emptyState()
+        : _trackTable(tracks, compact);
+
+    final config = LibraryPageConfig(
+      compact: compact,
+      hasNowPlayingPanel: hasNowPlayingPanel,
+      title: title,
+      trackCount: tracks.length,
+      onCreatePlaylist: _createPlaylist,
+      body: body,
+      error: _error,
+      onDismissError: () => setState(() => _error = null),
+      queueOpen: _queueOpen,
+      queuePanel: _queuePanel(),
     );
+
+    return switch (_section) {
+      'Inicio' => HomePage(config: config),
+      'Tu música' => MusicPage(config: config),
+      'Favoritos' => FavoritesPage(config: config),
+      'Álbumes' => AlbumsPage(config: config),
+      'Artistas' => ArtistsPage(config: config),
+      'Playlists' => PlaylistsPage(config: config),
+      _ => MiddleContentPanel(section: _section, config: config),
+    };
   }
 
   Widget _onlineSearchPanel() {
@@ -1572,138 +1381,42 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
     }
     if (_onlineResults.isEmpty) return const SizedBox.shrink();
-    return Container(
-      decoration: BoxDecoration(
-        color: _panel.withValues(alpha: .72),
-        borderRadius: BorderRadius.circular(15),
-        border: Border.all(color: Colors.white.withValues(alpha: .045)),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.fromLTRB(18, 14, 18, 10),
-            child: Row(
-              children: [
-                const Expanded(
-                  child: Text(
-                    'RESULTADOS ONLINE',
-                    style: TextStyle(
-                      color: _muted,
-                      fontSize: 9,
-                      letterSpacing: 1.2,
-                      fontWeight: FontWeight.w700,
-                    ),
-                  ),
-                ),
-                Text(
-                  '${_onlineResults.length} videos',
-                  style: const TextStyle(color: _muted, fontSize: 10),
-                ),
-              ],
+    return OnlineSearchResults(
+      results: _onlineResults
+          .map(
+            (track) => OnlineSearchResult(
+              videoId: track.videoId,
+              title: track.title,
+              artist: track.artist,
+              thumbnail: track.thumbnail,
+              durationSeconds: track.durationSeconds,
             ),
-          ),
-          Divider(height: 1, color: Colors.white.withValues(alpha: .05)),
-          ...List.generate(
-            _onlineResults.length,
-            (index) => _onlineTrackRow(_onlineResults[index], index),
-          ),
-        ],
+          )
+          .toList(growable: false),
+      playingVideoId: _playingOnlineTrack?.videoId,
+      isPlaying: _player.playing,
+      loadingVideoId: _onlinePlaybackLoading
+          ? _playingOnlineTrack?.videoId
+          : null,
+      onPlay: (index) => unawaited(
+        _playOnlineTrack(
+          _onlineResults[index],
+          queue: _onlineResults,
+          queueIndex: index,
+        ),
       ),
+      onOpen: (index) => _openOnlineTrack(_onlineResults[index]),
     );
   }
 
-  Widget _onlineTrackRow(_OnlineTrack track, int index) {
-    final selected = _playingOnlineTrack?.videoId == track.videoId;
-    final queue = _onlineResults;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 5),
-      child: Row(
-        children: [
-          IconButton(
-            tooltip: selected && _player.playing
-                ? 'En reproducción'
-                : 'Reproducir en SoundNeed',
-            onPressed: _onlinePlaybackLoading && selected
-                ? null
-                : () =>
-                      _playOnlineTrack(track, queue: queue, queueIndex: index),
-            icon: selected && _onlinePlaybackLoading
-                ? const SizedBox(
-                    width: 18,
-                    height: 18,
-                    child: CircularProgressIndicator(
-                      strokeWidth: 2,
-                      color: _cyan,
-                    ),
-                  )
-                : Icon(
-                    selected && _player.playing
-                        ? Icons.graphic_eq_rounded
-                        : Icons.play_arrow_rounded,
-                    color: selected ? _cyan : _muted,
-                  ),
-          ),
-          ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: SizedBox(
-              width: 72,
-              height: 42,
-              child: Image.network(
-                track.thumbnail,
-                fit: BoxFit.cover,
-                errorBuilder: (context, error, stackTrace) =>
-                    _coverPlaceholder(42),
-              ),
-            ),
-          ),
-          const SizedBox(width: 14),
-          Expanded(
-            child: InkWell(
-              onTap: () =>
-                  _playOnlineTrack(track, queue: queue, queueIndex: index),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    track.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                      color: selected ? _cyan : Colors.white,
-                    ),
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    track.artist,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(color: _muted, fontSize: 11),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-          if (track.durationSeconds > 0)
-            Text(
-              _time(Duration(seconds: track.durationSeconds)),
-              style: const TextStyle(color: _muted, fontSize: 10),
-            ),
-          IconButton(
-            tooltip: 'Abrir en YouTube',
-            onPressed: () => _openOnlineTrack(track),
-            icon: const Icon(
-              Icons.open_in_new_rounded,
-              size: 16,
-              color: _muted,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+  Widget _searchResultsPanel(List<Track> localTracks, bool compact) => Column(
+    crossAxisAlignment: CrossAxisAlignment.stretch,
+    children: [
+      if (localTracks.isNotEmpty) _trackTable(localTracks, compact),
+      if (localTracks.isNotEmpty) const SizedBox(height: 24),
+      _onlineSearchPanel(),
+    ],
+  );
 
   Widget _queuePanel() => Material(
     color: _raised,
@@ -2036,242 +1749,175 @@ class _LibraryScreenState extends State<LibraryScreen> {
     ),
   );
 
-  Widget _playerBar(Track? track, bool compact, {_OnlineTrack? onlineTrack}) {
+  Widget _miniPlayer(Track? track, bool compact) {
+    final onlineTrack = _playingOnlineTrack;
     final hasTrack = track != null || onlineTrack != null;
-    return Container(
-      height: 91,
-      padding: EdgeInsets.symmetric(horizontal: compact ? 14 : 28),
-      decoration: BoxDecoration(
-        color: _panel,
-        border: Border(
-          top: BorderSide(color: Colors.white.withValues(alpha: .07)),
-        ),
-      ),
-      child: Row(
-        children: [
-          SizedBox(
-            width: compact ? 170 : 245,
-            child: Row(
-              children: [
-                if (track != null)
-                  _cover(track, 48)
-                else if (onlineTrack != null)
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(10),
-                    child: SizedBox(
-                      width: 48,
-                      height: 48,
-                      child: Image.network(
-                        onlineTrack.thumbnail,
-                        fit: BoxFit.cover,
-                        errorBuilder: (context, error, stackTrace) =>
-                            _coverPlaceholder(48),
-                      ),
-                    ),
-                  )
-                else
-                  Container(
-                    width: 48,
-                    height: 48,
-                    decoration: BoxDecoration(
-                      color: _raised,
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: const Icon(Icons.music_note, color: _muted),
-                  ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        track?.title ??
-                            onlineTrack?.title ??
-                            'Elige una canción',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        track?.artist ??
-                            onlineTrack?.artist ??
-                            'Tu biblioteca te espera',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: const TextStyle(color: _muted, fontSize: 10),
-                      ),
-                    ],
-                  ),
-                ),
-                if (track != null)
-                  IconButton(
-                    visualDensity: VisualDensity.compact,
-                    tooltip: 'Favorito',
-                    onPressed: () => _toggleFavorite(track),
-                    icon: Icon(
-                      _favorites.contains(track.path)
-                          ? Icons.favorite
-                          : Icons.favorite_border,
-                      size: 17,
-                      color: _favorites.contains(track.path) ? _cyan : _muted,
-                    ),
-                  ),
-              ],
+    final coverSize = compact ? 38.0 : 50.0;
+    final coverPath = track?.coverPath;
+    final coverFile = coverPath == null ? null : File(coverPath);
+    final ImageProvider? artworkProvider = coverFile != null &&
+            coverFile.existsSync()
+        ? FileImage(coverFile)
+        : onlineTrack != null
+        ? NetworkImage(onlineTrack.thumbnail)
+        : null;
+    final cover = track != null
+        ? _cover(track, coverSize)
+        : onlineTrack != null
+        ? ClipRRect(
+            borderRadius: BorderRadius.circular(coverSize * .2),
+            child: SizedBox(
+              width: coverSize,
+              height: coverSize,
+              child: Image.network(
+                onlineTrack.thumbnail,
+                fit: BoxFit.cover,
+                errorBuilder: (context, error, stackTrace) =>
+                    _coverPlaceholder(coverSize),
+              ),
             ),
-          ),
-          Expanded(
-            child: Column(
-              mainAxisAlignment: MainAxisAlignment.center,
-              children: [
-                Row(
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    IconButton(
-                      tooltip: 'Anterior',
-                      onPressed: _playingOnlineTrack != null
-                          ? (_onlineQueueIndex > 0
-                                ? () => _skipOnlineTrack(-1)
-                                : null)
-                          : (_queue.isEmpty ? null : _player.seekToPrevious),
-                      visualDensity: VisualDensity.compact,
-                      icon: const Icon(Icons.skip_previous_rounded, size: 22),
-                    ),
-                    const SizedBox(width: 7),
-                    StreamBuilder<PlayerState>(
-                      stream: _player.playerStateStream,
-                      builder: (context, snapshot) {
-                        final playing = snapshot.data?.playing ?? false;
-                        return InkWell(
-                          onTap: !hasTrack
-                              ? _importFolder
-                              : () =>
-                                    playing ? _player.pause() : _player.play(),
-                          borderRadius: BorderRadius.circular(24),
-                          child: Container(
-                            width: 36,
-                            height: 36,
-                            decoration: const BoxDecoration(
-                              color: _cyan,
-                              shape: BoxShape.circle,
-                            ),
-                            child: _onlinePlaybackLoading
-                                ? const Padding(
-                                    padding: EdgeInsets.all(9),
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: _bg,
-                                    ),
-                                  )
-                                : Icon(
-                                    !hasTrack
-                                        ? Icons.add
-                                        : playing
-                                        ? Icons.pause_rounded
-                                        : Icons.play_arrow_rounded,
-                                    color: _bg,
-                                    size: 22,
-                                  ),
-                          ),
-                        );
-                      },
-                    ),
-                    const SizedBox(width: 7),
-                    IconButton(
-                      tooltip: 'Siguiente',
-                      onPressed: _playingOnlineTrack != null
-                          ? (_onlineQueueIndex >= 0 &&
-                                    _onlineQueueIndex <
-                                        _onlinePlaybackQueue.length - 1
-                                ? () => _skipOnlineTrack(1)
-                                : null)
-                          : (_queue.isEmpty ? null : _player.seekToNext),
-                      visualDensity: VisualDensity.compact,
-                      icon: const Icon(Icons.skip_next_rounded, size: 22),
-                    ),
-                  ],
-                ),
-                if (!compact)
-                  Row(
-                    children: [
-                      SizedBox(
-                        width: 38,
-                        child: Text(
-                          _time(_position),
-                          textAlign: TextAlign.right,
-                          style: const TextStyle(color: _muted, fontSize: 9),
-                        ),
-                      ),
-                      Expanded(
-                        child: Slider(
-                          value:
-                              _duration == null ||
-                                  _duration!.inMilliseconds <= 0
-                              ? 0
-                              : _position.inMilliseconds
-                                    .clamp(0, _duration!.inMilliseconds)
-                                    .toDouble(),
-                          max:
-                              _duration == null ||
-                                  _duration!.inMilliseconds <= 0
-                              ? 1
-                              : _duration!.inMilliseconds.toDouble(),
-                          onChanged: !hasTrack || _duration == null
-                              ? null
-                              : (value) => _player.seek(
-                                  Duration(milliseconds: value.round()),
-                                ),
-                        ),
-                      ),
-                      SizedBox(
-                        width: 38,
-                        child: Text(
-                          _time(_duration),
-                          style: const TextStyle(color: _muted, fontSize: 9),
-                        ),
-                      ),
-                    ],
-                  ),
-              ],
+          )
+        : Container(
+            width: coverSize,
+            height: coverSize,
+            decoration: BoxDecoration(
+              color: _raised,
+              borderRadius: BorderRadius.circular(10),
             ),
-          ),
-          SizedBox(
-            width: compact ? 80 : 180,
-            child: Row(
-              mainAxisAlignment: MainAxisAlignment.end,
-              children: [
-                IconButton(
-                  tooltip: _queueOpen ? 'Ocultar cola' : 'Ver cola',
-                  onPressed: () => setState(() => _queueOpen = !_queueOpen),
-                  visualDensity: VisualDensity.compact,
-                  icon: Icon(
-                    Icons.queue_music,
-                    size: 18,
-                    color: _queueOpen ? _cyan : _muted,
-                  ),
-                ),
-                if (!compact) ...[
-                  const Icon(Icons.volume_up_outlined, size: 17, color: _muted),
-                  SizedBox(
-                    width: 100,
-                    child: Slider(
-                      value: _volume,
-                      onChanged: (value) {
-                        setState(() => _volume = value);
-                        _player.setVolume(value);
-                      },
-                    ),
-                  ),
-                ],
-              ],
+            child: const Icon(Icons.music_note, color: _muted),
+          );
+
+    return MiniPlayer(
+      compact: compact,
+      hasTrack: hasTrack,
+      title: track?.title ?? onlineTrack?.title ?? 'Elige una canción',
+      artist: track?.artist ?? onlineTrack?.artist ?? 'Tu biblioteca te espera',
+      cover: cover,
+      artworkProvider: artworkProvider,
+      isFavorite: track != null && _favorites.contains(track.path),
+      onToggleFavorite: track == null
+          ? null
+          : () => unawaited(_toggleFavorite(track)),
+      playerStateStream: _player.playerStateStream,
+      loading: _onlinePlaybackLoading,
+      onTogglePlayback: (playing) {
+        if (!hasTrack) {
+          unawaited(_importFolder());
+        } else if (playing) {
+          unawaited(_player.pause());
+        } else {
+          unawaited(_player.play());
+        }
+      },
+      shuffleEnabled: _player.shuffleModeEnabled,
+      onToggleShuffle: onlineTrack == null
+          ? () async {
+              await _player.setShuffleModeEnabled(
+                !_player.shuffleModeEnabled,
+              );
+              if (mounted) setState(() {});
+            }
+          : null,
+      loopEnabled: _loopEnabled,
+      onToggleLoop: () {
+        final enabled = !_loopEnabled;
+        setState(() => _loopEnabled = enabled);
+        unawaited(_player.setLoopMode(enabled ? LoopMode.all : LoopMode.off));
+      },
+      onPrevious: onlineTrack != null
+          ? (_onlineQueueIndex > 0
+                ? () => unawaited(_skipOnlineTrack(-1))
+                : null)
+          : (_queue.isEmpty ? null : () => unawaited(_player.seekToPrevious())),
+      onNext: onlineTrack != null
+          ? (_onlineQueueIndex >= 0 &&
+                    _onlineQueueIndex < _onlinePlaybackQueue.length - 1
+                ? () => unawaited(_skipOnlineTrack(1))
+                : null)
+          : (_queue.isEmpty ? null : () => unawaited(_player.seekToNext())),
+      position: _position,
+      duration: _duration,
+      positionLabel: _time(_position),
+      durationLabel: _time(_duration),
+      onSeek: !hasTrack || _duration == null
+          ? null
+          : (position) => unawaited(_player.seek(position)),
+      volume: _volume,
+      onVolumeChanged: (value) {
+        setState(() => _volume = value);
+        unawaited(_player.setVolume(value));
+      },
+      queueOpen: _queueOpen,
+      onToggleQueue: () => setState(() => _queueOpen = !_queueOpen),
+      windowMaximized: _windowMaximized,
+      onToggleWindowSize: () => unawaited(_toggleWindowMaximize()),
+      panelColor: _panel,
+      accentColor: _cyan,
+      mutedColor: _muted,
+    );
+  }
+
+  Widget _nowPlayingPanel(Track? track) {
+    final onlineTrack = _playingOnlineTrack;
+    final hasTrack = track != null || onlineTrack != null;
+    final artwork = track != null
+        ? _cover(track, 246)
+        : onlineTrack != null
+        ? ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: Image.network(
+              onlineTrack.thumbnail,
+              width: 246,
+              height: 246,
+              fit: BoxFit.cover,
+              errorBuilder: (context, error, stackTrace) => _coverPlaceholder(246),
             ),
-          ),
-        ],
-      ),
+          )
+        : _coverPlaceholder(246);
+    return NowPlayingPanel(
+      title: track?.title ?? onlineTrack?.title ?? 'Elige una canción',
+      artist: track?.artist ?? onlineTrack?.artist ?? 'Tu biblioteca te espera',
+      artwork: artwork,
+      hasTrack: hasTrack,
+      isFavorite: track != null && _favorites.contains(track.path),
+      onToggleFavorite: track == null
+          ? null
+          : () => unawaited(_toggleFavorite(track)),
+      playerStateStream: _player.playerStateStream,
+      position: _position,
+      duration: _duration,
+      positionLabel: _time(_position),
+      durationLabel: _time(_duration),
+      onSeek: !hasTrack || _duration == null
+          ? null
+          : (position) => unawaited(_player.seek(position)),
+      onTogglePlayback: (playing) {
+        if (!hasTrack) {
+          unawaited(_importFolder());
+        } else if (playing) {
+          unawaited(_player.pause());
+        } else {
+          unawaited(_player.play());
+        }
+      },
+      onPrevious: onlineTrack != null
+          ? (_onlineQueueIndex > 0
+                ? () => unawaited(_skipOnlineTrack(-1))
+                : null)
+          : (_queue.isEmpty ? null : () => unawaited(_player.seekToPrevious())),
+      onNext: onlineTrack != null
+          ? (_onlineQueueIndex >= 0 &&
+                    _onlineQueueIndex < _onlinePlaybackQueue.length - 1
+                ? () => unawaited(_skipOnlineTrack(1))
+                : null)
+          : (_queue.isEmpty ? null : () => unawaited(_player.seekToNext())),
+      volume: _volume,
+      onVolumeChanged: (value) {
+        setState(() => _volume = value);
+        unawaited(_player.setVolume(value));
+      },
+      queueOpen: _queueOpen,
+      onToggleQueue: () => setState(() => _queueOpen = !_queueOpen),
     );
   }
 

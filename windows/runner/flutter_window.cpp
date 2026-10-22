@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <windowsx.h>
 
 #include "flutter/generated_plugin_registrant.h"
 
@@ -25,6 +26,45 @@ bool FlutterWindow::OnCreate() {
     return false;
   }
   RegisterPlugins(flutter_controller_->engine());
+
+  window_channel_ =
+      std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
+          flutter_controller_->engine()->messenger(), "soundneed/window",
+          &flutter::StandardMethodCodec::GetInstance());
+  window_channel_->SetMethodCallHandler(
+      [this](const flutter::MethodCall<flutter::EncodableValue>& call,
+             std::unique_ptr<flutter::MethodResult<flutter::EncodableValue>>
+                 result) {
+        const HWND window = GetHandle();
+        if (!window) {
+          result->Error("window_unavailable", "The window is not available.");
+          return;
+        }
+
+        const auto& method = call.method_name();
+        if (method == "minimize") {
+          ShowWindow(window, SW_MINIMIZE);
+          result->Success(flutter::EncodableValue());
+        } else if (method == "toggleMaximize") {
+          const bool was_maximized = IsZoomed(window) != FALSE;
+          ShowWindow(window, was_maximized ? SW_RESTORE : SW_MAXIMIZE);
+          result->Success(
+              flutter::EncodableValue(IsZoomed(window) != FALSE));
+        } else if (method == "close") {
+          PostMessage(window, WM_CLOSE, 0, 0);
+          result->Success(flutter::EncodableValue());
+        } else if (method == "drag") {
+          ReleaseCapture();
+          POINT cursor{};
+          GetCursorPos(&cursor);
+          SendMessage(window, WM_NCLBUTTONDOWN, HTCAPTION,
+                      MAKELPARAM(cursor.x, cursor.y));
+          result->Success(flutter::EncodableValue());
+        } else {
+          result->NotImplemented();
+        }
+      });
+
   SetChildContent(flutter_controller_->view()->GetNativeWindow());
 
   flutter_controller_->engine()->SetNextFrameCallback([&]() {
@@ -40,6 +80,7 @@ bool FlutterWindow::OnCreate() {
 }
 
 void FlutterWindow::OnDestroy() {
+  window_channel_.reset();
   if (flutter_controller_) {
     flutter_controller_ = nullptr;
   }
@@ -51,6 +92,56 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Let Windows own the move loop started from the custom Flutter title area.
+  if (message == WM_NCLBUTTONDOWN && wparam == HTCAPTION) {
+    return DefWindowProc(hwnd, message, wparam, lparam);
+  }
+
+  // Remove the non-client frame so the Flutter surface reaches the exact
+  // window bounds. The custom WM_NCHITTEST handling below keeps resize edges.
+  if (message == WM_NCCALCSIZE) {
+    return 0;
+  }
+
+  if (message == WM_GETMINMAXINFO) {
+    const HMONITOR monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO monitor_info{};
+    monitor_info.cbSize = sizeof(monitor_info);
+    auto* limits = reinterpret_cast<MINMAXINFO*>(lparam);
+    if (limits && GetMonitorInfo(monitor, &monitor_info)) {
+      const RECT& monitor_area = monitor_info.rcMonitor;
+      const RECT& work_area = monitor_info.rcWork;
+      limits->ptMaxPosition.x = work_area.left - monitor_area.left;
+      limits->ptMaxPosition.y = work_area.top - monitor_area.top;
+      limits->ptMaxSize.x = work_area.right - work_area.left;
+      limits->ptMaxSize.y = work_area.bottom - work_area.top;
+      return 0;
+    }
+  }
+
+  if (message == WM_NCHITTEST && !IsZoomed(hwnd)) {
+    RECT bounds{};
+    if (GetWindowRect(hwnd, &bounds)) {
+      const int x = GET_X_LPARAM(lparam);
+      const int y = GET_Y_LPARAM(lparam);
+      const int border = GetSystemMetrics(SM_CXSIZEFRAME) +
+                         GetSystemMetrics(SM_CXPADDEDBORDER);
+      const bool left = x < bounds.left + border;
+      const bool right = x >= bounds.right - border;
+      const bool top = y < bounds.top + border;
+      const bool bottom = y >= bounds.bottom - border;
+
+      if (top && left) return HTTOPLEFT;
+      if (top && right) return HTTOPRIGHT;
+      if (bottom && left) return HTBOTTOMLEFT;
+      if (bottom && right) return HTBOTTOMRIGHT;
+      if (left) return HTLEFT;
+      if (right) return HTRIGHT;
+      if (top) return HTTOP;
+      if (bottom) return HTBOTTOM;
+    }
+  }
+
   // Give Flutter, including plugins, an opportunity to handle window messages.
   if (flutter_controller_) {
     std::optional<LRESULT> result =

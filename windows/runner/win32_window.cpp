@@ -1,5 +1,6 @@
 #include "win32_window.h"
 
+#include <algorithm>
 #include <dwmapi.h>
 #include <flutter_windows.h>
 
@@ -134,15 +135,46 @@ bool Win32Window::Create(const std::wstring& title,
   UINT dpi = FlutterDesktopGetDpiForMonitor(monitor);
   double scale_factor = dpi / 96.0;
 
+  MONITORINFO monitor_info{};
+  monitor_info.cbSize = sizeof(monitor_info);
+  const bool has_work_area = GetMonitorInfo(monitor, &monitor_info) != FALSE;
+  const RECT work_area = has_work_area ? monitor_info.rcWork : RECT{};
+  int window_width = Scale(size.width, scale_factor);
+  int window_height = Scale(size.height, scale_factor);
+  int window_x = Scale(origin.x, scale_factor);
+  int window_y = Scale(origin.y, scale_factor);
+  if (has_work_area) {
+    const int work_width = work_area.right - work_area.left;
+    const int work_height = work_area.bottom - work_area.top;
+    // Keep a margin around the initial window and leave the taskbar visible,
+    // including on high-DPI displays where the logical size scales up.
+    window_width = std::min(window_width, work_width * 85 / 100);
+    window_height = std::min(window_height, work_height * 85 / 100);
+    window_x = work_area.left + (work_width - window_width) / 2;
+    window_y = work_area.top + (work_height - window_height) / 2;
+  }
+
   HWND window = CreateWindow(
-      window_class, title.c_str(), WS_OVERLAPPEDWINDOW,
-      Scale(origin.x, scale_factor), Scale(origin.y, scale_factor),
-      Scale(size.width, scale_factor), Scale(size.height, scale_factor),
-      nullptr, nullptr, GetModuleHandle(nullptr), this);
+      window_class, title.c_str(),
+      WS_OVERLAPPED | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX |
+          WS_MAXIMIZEBOX,
+      window_x, window_y, window_width, window_height, nullptr, nullptr,
+      GetModuleHandle(nullptr), this);
 
   if (!window) {
     return false;
   }
+
+  // Some Windows configurations restore the standard caption during window
+  // creation. Remove it explicitly and ask DWM to recalculate the frame so
+  // Flutter's custom header reaches the top edge of the window.
+  LONG_PTR window_style = GetWindowLongPtr(window, GWL_STYLE);
+  window_style &=
+      ~static_cast<LONG_PTR>(WS_CAPTION | WS_MAXIMIZE | WS_POPUP);
+  SetWindowLongPtr(window, GWL_STYLE, window_style);
+  SetWindowPos(window, nullptr, 0, 0, 0, 0,
+               SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE |
+                   SWP_FRAMECHANGED);
 
   UpdateTheme(window);
 
@@ -150,7 +182,7 @@ bool Win32Window::Create(const std::wstring& title,
 }
 
 bool Win32Window::Show() {
-  return ShowWindow(window_handle_, SW_SHOWNORMAL);
+  return ShowWindow(window_handle_, SW_MAXIMIZE);
 }
 
 // static
