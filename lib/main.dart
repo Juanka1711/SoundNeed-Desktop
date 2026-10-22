@@ -12,7 +12,6 @@ import 'package:flutter/services.dart' show MethodChannel;
 import 'package:just_audio/just_audio.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
 
 import 'pages/albums_page.dart';
@@ -109,6 +108,15 @@ class _OnlineTrack {
   final String artist;
   final String thumbnail;
   final int durationSeconds;
+}
+
+class _HomeOnlineCategory {
+  _HomeOnlineCategory(this.query);
+
+  final String query;
+  List<_OnlineTrack> tracks = const [];
+  bool loading = true;
+  String? error;
 }
 
 class _ResolvedOnlineAudio {
@@ -254,6 +262,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
   _OnlineTrack? _playingOnlineTrack;
   String _query = '';
   List<_OnlineTrack> _onlineResults = const [];
+  final _HomeOnlineCategory _colombiaChart = _HomeOnlineCategory(
+    'Top Colombia 2026 canciones más escuchadas',
+  );
+  final _HomeOnlineCategory _worldChart = _HomeOnlineCategory(
+    'Top global 2026 canciones más escuchadas',
+  );
+  final _HomeOnlineCategory _discoverMusic = _HomeOnlineCategory(
+    'Nuevos lanzamientos música latina 2026',
+  );
+  final _HomeOnlineCategory _podcastSuggestions = _HomeOnlineCategory(
+    'Podcasts Colombia entrevistas música',
+  );
   Duration _position = Duration.zero;
   Duration? _duration;
   double _volume = .78;
@@ -271,6 +291,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _restore();
+    unawaited(_loadHomeCategory(_colombiaChart));
+    unawaited(_loadHomeCategory(_worldChart));
+    unawaited(_loadHomeCategory(_discoverMusic));
+    unawaited(_loadHomeCategory(_podcastSuggestions));
     _indexSubscription = _player.currentIndexStream.listen((index) {
       if (!mounted) return;
       setState(() {
@@ -514,6 +538,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
     return view.toList();
   }
 
+  Track? get _currentLocalTrack {
+    final index = _currentIndex;
+    if (index == null || index < 0 || index >= _queue.length) return null;
+    final path = _queue[index];
+    for (final track in _tracks) {
+      if (track.path == path) return track;
+    }
+    return null;
+  }
+
   Future<void> _loadQueue(
     List<Track> tracks, {
     int startAt = 0,
@@ -559,6 +593,51 @@ class _LibraryScreenState extends State<LibraryScreen> {
       source.isEmpty ? [track] : source,
       startAt: index < 0 ? 0 : index,
     );
+  }
+
+  Future<void> _playSurpriseMix() async {
+    if (_tracks.isNotEmpty) {
+      final mix = List<Track>.of(_tracks)..shuffle();
+      await _loadQueue(mix.take(20).toList(growable: false));
+      return;
+    }
+    if (_colombiaChart.tracks.isNotEmpty) {
+      await _playOnlineTrack(
+        _colombiaChart.tracks.first,
+        queue: _colombiaChart.tracks,
+        queueIndex: 0,
+      );
+      return;
+    }
+    if (mounted) {
+      _toast('Importa canciones o espera a que cargue Top Colombia.');
+    }
+  }
+
+  Future<void> _playArtistStation(String artist) async {
+    try {
+      final videos = await _youtube.search.search('$artist mix canciones');
+      final results = videos
+          .take(20)
+          .map(
+            (video) => _OnlineTrack(
+              videoId: video.id.value,
+              title: video.title,
+              artist: video.author,
+              thumbnail: video.thumbnails.highResUrl,
+              durationSeconds: video.duration?.inSeconds ?? 0,
+            ),
+          )
+          .where((track) => track.videoId.isNotEmpty && track.title.isNotEmpty)
+          .toList(growable: false);
+      if (results.isEmpty) {
+        if (mounted) _toast('No encontramos canciones de $artist.');
+        return;
+      }
+      await _playOnlineTrack(results.first, queue: results, queueIndex: 0);
+    } catch (_) {
+      if (mounted) _toast('No se pudo cargar la estación de $artist.');
+    }
   }
 
   Future<void> _toggleFavorite(Track track) async {
@@ -726,15 +805,52 @@ class _LibraryScreenState extends State<LibraryScreen> {
       setState(() {
         _onlineResults = const [];
         _onlineSearching = false;
-        _onlineError = 'No se pudo buscar en YouTube. Comprueba tu conexión e inténtalo de nuevo.';
+        _onlineError = 'No se pudo completar la búsqueda. Comprueba tu conexión e inténtalo de nuevo.';
       });
     }
   }
 
-  Future<void> _openOnlineTrack(_OnlineTrack track) async {
-    final uri = Uri.https('www.youtube.com', '/watch', {'v': track.videoId});
-    final opened = await launchUrl(uri, mode: LaunchMode.externalApplication);
-    if (!opened && mounted) _toast('No se pudo abrir el navegador.');
+  Future<void> _loadHomeCategory(
+    _HomeOnlineCategory category, {
+    bool refresh = false,
+  }) async {
+    if (category.loading && category.tracks.isNotEmpty && !refresh) return;
+    setState(() {
+      category.loading = true;
+      category.error = null;
+    });
+
+    try {
+      final videos = await _youtube.search.search(category.query);
+      final tracks = videos
+          .take(12)
+          .map(
+            (video) => _OnlineTrack(
+              videoId: video.id.value,
+              title: video.title,
+              artist: video.author,
+              thumbnail: video.thumbnails.highResUrl,
+              durationSeconds: video.duration?.inSeconds ?? 0,
+            ),
+          )
+          .where((track) => track.videoId.isNotEmpty && track.title.isNotEmpty)
+          .toList(growable: false);
+
+      if (!mounted) return;
+      setState(() {
+        category.tracks = tracks;
+        category.loading = false;
+        category.error = tracks.isEmpty
+            ? 'No encontramos resultados para esta sección.'
+            : null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        category.loading = false;
+        category.error = 'No se pudo cargar esta sección. Revisa tu conexión.';
+      });
+    }
   }
 
   Future<void> _playOnlineTrack(
@@ -843,9 +959,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final detail = error.toString().toLowerCase();
       final message =
           detail.contains('not a bot') || detail.contains('sign in to confirm')
-          ? 'YouTube bloqueó esta solicitud automática. Prueba otro resultado o inténtalo más tarde.'
+          ? 'El servicio de música bloqueó esta solicitud automática. Prueba otro resultado o inténtalo más tarde.'
           : error is VideoUnplayableException
-          ? 'YouTube no entregó un stream de audio reproducible a SoundNeed. Esto no confirma que el video sea privado o haya sido retirado; prueba otro resultado o inténtalo más tarde.'
+          ? 'No se pudo obtener audio reproducible para esta canción. Prueba otro resultado o inténtalo más tarde.'
           : 'No se pudo obtener o reproducir el audio online. Intenta con otro resultado. ($error)';
       setState(() {
         _onlinePlaybackLoading = false;
@@ -1302,12 +1418,46 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
+  HomeOnlineSection _homeOnlineSection(
+    _HomeOnlineCategory category, {
+    required String title,
+    required String subtitle,
+  }) {
+    final results = category.tracks
+        .map(
+          (track) => OnlineSearchResult(
+            videoId: track.videoId,
+            title: track.title,
+            artist: track.artist,
+            thumbnail: track.thumbnail,
+            durationSeconds: track.durationSeconds,
+          ),
+        )
+        .toList(growable: false);
+
+    return HomeOnlineSection(
+      title: title,
+      subtitle: subtitle,
+      results: results,
+      loading: category.loading,
+      error: category.error,
+      onRefresh: () => unawaited(_loadHomeCategory(category, refresh: true)),
+      onPlay: (index) => unawaited(
+        _playOnlineTrack(
+          category.tracks[index],
+          queue: category.tracks,
+          queueIndex: index,
+        ),
+      ),
+    );
+  }
+
   Widget _mainContent(bool compact, bool hasNowPlayingPanel) {
     final tracks = _visibleTracks;
     final title = _section == 'Playlists' && _playlistView != null
         ? _playlistView!
         : _section;
-    final Widget body = _loading
+    final Widget libraryBody = _loading
         ? const Center(
             child: Padding(
               padding: EdgeInsets.all(64),
@@ -1324,14 +1474,13 @@ class _LibraryScreenState extends State<LibraryScreen> {
         : tracks.isEmpty
         ? _emptyState()
         : _trackTable(tracks, compact);
-
     final config = LibraryPageConfig(
       compact: compact,
       hasNowPlayingPanel: hasNowPlayingPanel,
       title: title,
       trackCount: tracks.length,
       onCreatePlaylist: _createPlaylist,
-      body: body,
+      body: libraryBody,
       error: _error,
       onDismissError: () => setState(() => _error = null),
       queueOpen: _queueOpen,
@@ -1339,7 +1488,49 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
 
     return switch (_section) {
-      'Inicio' => HomePage(config: config),
+      'Inicio' => HomePage(
+        config: config,
+        colombiaChart: _homeOnlineSection(
+          _colombiaChart,
+          title: 'Top Colombia',
+          subtitle: 'Canciones populares en distintos géneros',
+        ),
+        worldChart: _homeOnlineSection(
+          _worldChart,
+          title: 'Top mundial',
+          subtitle: 'Éxitos que se escuchan en todo el mundo',
+        ),
+        discoverMusic: _homeOnlineSection(
+          _discoverMusic,
+          title: 'Descubre música',
+          subtitle: 'Lanzamientos y nuevos artistas',
+        ),
+        podcastSuggestions: _homeOnlineSection(
+          _podcastSuggestions,
+          title: 'Podcasts',
+          subtitle: 'Conversaciones y programas para escuchar',
+        ),
+        playingVideoId: _playingOnlineTrack?.videoId,
+        isPlaying: _player.playing,
+        loadingVideoId: _onlinePlaybackLoading
+            ? _playingOnlineTrack?.videoId
+            : null,
+        continueTitle: _playingOnlineTrack?.title ?? _currentLocalTrack?.title,
+        continueArtist:
+            _playingOnlineTrack?.artist ?? _currentLocalTrack?.artist,
+        onContinue: _playingOnlineTrack == null && _currentLocalTrack == null
+            ? null
+            : () => unawaited(_player.play()),
+        stationArtists: _tracks
+            .map((track) => track.artist.trim())
+            .where((artist) => artist.isNotEmpty)
+            .toSet()
+            .take(6)
+            .toList(growable: false),
+        onSurpriseMix: () => unawaited(_playSurpriseMix()),
+        onPlayStation: (artist) => unawaited(_playArtistStation(artist)),
+        onNavigate: _navigate,
+      ),
       'Tu música' => MusicPage(config: config),
       'Favoritos' => FavoritesPage(config: config),
       'Álbumes' => AlbumsPage(config: config),
@@ -1352,7 +1543,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   Widget _onlineSearchPanel() {
     if (_query.trim().isEmpty) {
       return _notAvailable(
-        'Busca música en YouTube',
+        'Busca música online',
         'Escribe el nombre de una canción o artista. Pulsa el icono de reproducción para escucharla en SoundNeed.',
       );
     }
@@ -1366,7 +1557,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
               CircularProgressIndicator(color: _cyan),
               SizedBox(height: 14),
               Text(
-                'Buscando en YouTube…',
+                'Buscando música online…',
                 style: TextStyle(color: _muted, fontSize: 12),
               ),
             ],
@@ -1405,7 +1596,6 @@ class _LibraryScreenState extends State<LibraryScreen> {
           queueIndex: index,
         ),
       ),
-      onOpen: (index) => _openOnlineTrack(_onlineResults[index]),
     );
   }
 
@@ -1635,14 +1825,18 @@ class _LibraryScreenState extends State<LibraryScreen> {
           children: [
             SizedBox(
               width: 34,
-              child: IconButton(
-                visualDensity: VisualDensity.compact,
-                tooltip: 'Reproducir',
-                onPressed: () => _playTrack(track),
-                icon: Icon(
-                  playing ? Icons.equalizer_rounded : Icons.play_arrow_rounded,
-                  color: playing ? _cyan : _muted,
-                  size: 19,
+              child: Semantics(
+                label: 'Reproducir',
+                child: IconButton(
+                  visualDensity: VisualDensity.compact,
+                  onPressed: () => _playTrack(track),
+                  icon: Icon(
+                    playing
+                        ? Icons.equalizer_rounded
+                        : Icons.play_arrow_rounded,
+                    color: playing ? _cyan : _muted,
+                    size: 19,
+                  ),
                 ),
               ),
             ),
@@ -1695,28 +1889,33 @@ class _LibraryScreenState extends State<LibraryScreen> {
                 style: const TextStyle(color: _muted, fontSize: 10),
               ),
             ),
-            PopupMenuButton<String>(
-              tooltip: 'Más opciones',
-              iconSize: 17,
-              padding: EdgeInsets.zero,
-              onSelected: (value) {
-                if (value == 'favorite') _toggleFavorite(track);
-                if (value == 'playlist') _addToPlaylist(track);
-              },
-              itemBuilder: (_) => [
-                PopupMenuItem(
-                  value: 'favorite',
-                  child: Text(
-                    _favorites.contains(track.path)
-                        ? 'Quitar de favoritos'
-                        : 'Añadir a favoritos',
-                  ),
+            Semantics(
+              label: 'Más opciones',
+              child: TooltipVisibility(
+                visible: false,
+                child: PopupMenuButton<String>(
+                  iconSize: 17,
+                  padding: EdgeInsets.zero,
+                  onSelected: (value) {
+                    if (value == 'favorite') _toggleFavorite(track);
+                    if (value == 'playlist') _addToPlaylist(track);
+                  },
+                  itemBuilder: (_) => [
+                    PopupMenuItem(
+                      value: 'favorite',
+                      child: Text(
+                        _favorites.contains(track.path)
+                            ? 'Quitar de favoritos'
+                            : 'Añadir a favoritos',
+                      ),
+                    ),
+                    const PopupMenuItem(
+                      value: 'playlist',
+                      child: Text('Añadir a playlist'),
+                    ),
+                  ],
                 ),
-                const PopupMenuItem(
-                  value: 'playlist',
-                  child: Text('Añadir a playlist'),
-                ),
-              ],
+              ),
             ),
           ],
         ),
@@ -1755,8 +1954,8 @@ class _LibraryScreenState extends State<LibraryScreen> {
     final coverSize = compact ? 38.0 : 50.0;
     final coverPath = track?.coverPath;
     final coverFile = coverPath == null ? null : File(coverPath);
-    final ImageProvider? artworkProvider = coverFile != null &&
-            coverFile.existsSync()
+    final ImageProvider? artworkProvider =
+        coverFile != null && coverFile.existsSync()
         ? FileImage(coverFile)
         : onlineTrack != null
         ? NetworkImage(onlineTrack.thumbnail)
@@ -1812,9 +2011,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       shuffleEnabled: _player.shuffleModeEnabled,
       onToggleShuffle: onlineTrack == null
           ? () async {
-              await _player.setShuffleModeEnabled(
-                !_player.shuffleModeEnabled,
-              );
+              await _player.setShuffleModeEnabled(!_player.shuffleModeEnabled);
               if (mounted) setState(() {});
             }
           : null,
@@ -1859,65 +2056,25 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   Widget _nowPlayingPanel(Track? track) {
     final onlineTrack = _playingOnlineTrack;
-    final hasTrack = track != null || onlineTrack != null;
     final artwork = track != null
-        ? _cover(track, 246)
+        ? _cover(track, 270)
         : onlineTrack != null
         ? ClipRRect(
             borderRadius: BorderRadius.circular(20),
             child: Image.network(
               onlineTrack.thumbnail,
-              width: 246,
-              height: 246,
+              width: 270,
+              height: 270,
               fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) => _coverPlaceholder(246),
+              errorBuilder: (context, error, stackTrace) =>
+                  _coverPlaceholder(270),
             ),
           )
-        : _coverPlaceholder(246);
+        : _coverPlaceholder(270);
     return NowPlayingPanel(
       title: track?.title ?? onlineTrack?.title ?? 'Elige una canción',
       artist: track?.artist ?? onlineTrack?.artist ?? 'Tu biblioteca te espera',
       artwork: artwork,
-      hasTrack: hasTrack,
-      isFavorite: track != null && _favorites.contains(track.path),
-      onToggleFavorite: track == null
-          ? null
-          : () => unawaited(_toggleFavorite(track)),
-      playerStateStream: _player.playerStateStream,
-      position: _position,
-      duration: _duration,
-      positionLabel: _time(_position),
-      durationLabel: _time(_duration),
-      onSeek: !hasTrack || _duration == null
-          ? null
-          : (position) => unawaited(_player.seek(position)),
-      onTogglePlayback: (playing) {
-        if (!hasTrack) {
-          unawaited(_importFolder());
-        } else if (playing) {
-          unawaited(_player.pause());
-        } else {
-          unawaited(_player.play());
-        }
-      },
-      onPrevious: onlineTrack != null
-          ? (_onlineQueueIndex > 0
-                ? () => unawaited(_skipOnlineTrack(-1))
-                : null)
-          : (_queue.isEmpty ? null : () => unawaited(_player.seekToPrevious())),
-      onNext: onlineTrack != null
-          ? (_onlineQueueIndex >= 0 &&
-                    _onlineQueueIndex < _onlinePlaybackQueue.length - 1
-                ? () => unawaited(_skipOnlineTrack(1))
-                : null)
-          : (_queue.isEmpty ? null : () => unawaited(_player.seekToNext())),
-      volume: _volume,
-      onVolumeChanged: (value) {
-        setState(() => _volume = value);
-        unawaited(_player.setVolume(value));
-      },
-      queueOpen: _queueOpen,
-      onToggleQueue: () => setState(() => _queueOpen = !_queueOpen),
     );
   }
 
@@ -1952,7 +2109,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ),
         const SizedBox(height: 5),
         const Text(
-          'La búsqueda online consulta YouTube y reproduce el audio seleccionado dentro del reproductor. Letras sincronizadas, recomendaciones y SoundNeed Connect siguen pendientes.',
+          'La búsqueda online permite encontrar y reproducir música desde el reproductor. Letras sincronizadas y SoundNeed Connect siguen pendientes.',
           style: TextStyle(color: _muted, fontSize: 12, height: 1.5),
         ),
         const SizedBox(height: 20),

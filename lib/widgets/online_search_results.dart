@@ -1,4 +1,3 @@
-
 import 'package:flutter/material.dart';
 
 class OnlineSearchResult {
@@ -24,7 +23,6 @@ class OnlineSearchResults extends StatelessWidget {
     required this.isPlaying,
     required this.loadingVideoId,
     required this.onPlay,
-    required this.onOpen,
     this.onAddToPlaylist,
     super.key,
   });
@@ -34,7 +32,6 @@ class OnlineSearchResults extends StatelessWidget {
   final bool isPlaying;
   final String? loadingVideoId;
   final ValueChanged<int> onPlay;
-  final ValueChanged<int> onOpen;
 
   /// Opcional: conectar después con el sistema real de playlists.
   final ValueChanged<int>? onAddToPlaylist;
@@ -56,11 +53,7 @@ class OnlineSearchResults extends StatelessWidget {
         child: Center(
           child: Column(
             children: [
-              Icon(
-                Icons.music_off_rounded,
-                size: 42,
-                color: _muted,
-              ),
+              Icon(Icons.music_off_rounded, size: 42, color: _muted),
               SizedBox(height: 14),
               Text(
                 'No encontramos canciones',
@@ -156,10 +149,7 @@ class OnlineSearchResults extends StatelessWidget {
                     result.artist,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
-                      color: _muted,
-                      fontSize: 14,
-                    ),
+                    style: const TextStyle(color: _muted, fontSize: 14),
                   ),
                   const SizedBox(height: 22),
                   Wrap(
@@ -174,8 +164,8 @@ class OnlineSearchResults extends StatelessWidget {
                         icon: loading
                             ? null
                             : selected && isPlaying
-                                ? Icons.equalizer_rounded
-                                : Icons.play_arrow_rounded,
+                            ? Icons.equalizer_rounded
+                            : Icons.play_arrow_rounded,
                         primary: true,
                         onPressed: loading ? null : () => onPlay(0),
                         loading: loading,
@@ -184,11 +174,6 @@ class OnlineSearchResults extends StatelessWidget {
                         tooltip: 'Agregar a playlist',
                         icon: Icons.add_rounded,
                         onPressed: () => _addToPlaylist(context, 0),
-                      ),
-                      _circleButton(
-                        tooltip: 'Abrir en YouTube',
-                        icon: Icons.open_in_new_rounded,
-                        onPressed: () => onOpen(0),
                       ),
                     ],
                   ),
@@ -263,10 +248,7 @@ class OnlineSearchResults extends StatelessWidget {
                       result.artist,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(
-                        color: _muted,
-                        fontSize: 12,
-                      ),
+                      style: const TextStyle(color: _muted, fontSize: 12),
                     ),
                   ],
                 ),
@@ -296,21 +278,15 @@ class OnlineSearchResults extends StatelessWidget {
             tooltip: loading
                 ? 'Cargando canción'
                 : selected && isPlaying
-                    ? 'En reproducción'
-                    : 'Reproducir',
+                ? 'En reproducción'
+                : 'Reproducir',
             icon: loading
                 ? null
                 : selected && isPlaying
-                    ? Icons.equalizer_rounded
-                    : Icons.play_arrow_rounded,
+                ? Icons.equalizer_rounded
+                : Icons.play_arrow_rounded,
             loading: loading,
             onPressed: loading ? null : () => onPlay(index),
-          ),
-          const SizedBox(width: 4),
-          _circleButton(
-            tooltip: 'Abrir en YouTube',
-            icon: Icons.open_in_new_rounded,
-            onPressed: () => onOpen(index),
           ),
         ],
       ),
@@ -324,36 +300,37 @@ class OnlineSearchResults extends StatelessWidget {
     bool primary = false,
     bool loading = false,
   }) {
-    return Tooltip(
-      message: tooltip,
-      child: Material(
-        color: primary
-            ? _cyan
-            : Colors.white.withValues(alpha: 0.055),
-        shape: const CircleBorder(),
-        child: InkWell(
-          onTap: onPressed,
-          customBorder: const CircleBorder(),
-          child: SizedBox(
-            width: primary ? 44 : 36,
-            height: primary ? 44 : 36,
-            child: Center(
-              child: loading
-                  ? const SizedBox(
-                      width: 16,
-                      height: 16,
-                      child: CircularProgressIndicator(
-                        strokeWidth: 2,
-                        color: _cyan,
+    return Semantics(
+      label: tooltip,
+      button: true,
+      enabled: onPressed != null,
+      onTap: onPressed,
+      child: ExcludeSemantics(
+        child: Material(
+          color: primary ? _cyan : Colors.white.withValues(alpha: 0.055),
+          shape: const CircleBorder(),
+          child: InkWell(
+            onTap: onPressed,
+            customBorder: const CircleBorder(),
+            child: SizedBox(
+              width: primary ? 44 : 36,
+              height: primary ? 44 : 36,
+              child: Center(
+                child: loading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: _cyan,
+                        ),
+                      )
+                    : Icon(
+                        icon,
+                        size: primary ? 24 : 18,
+                        color: primary ? const Color(0xFF0B0B12) : Colors.white,
                       ),
-                    )
-                  : Icon(
-                      icon,
-                      size: primary ? 24 : 18,
-                      color: primary
-                          ? const Color(0xFF0B0B12)
-                          : Colors.white,
-                    ),
+              ),
             ),
           ),
         ),
@@ -365,11 +342,7 @@ class OnlineSearchResults extends StatelessWidget {
     return Container(
       color: const Color(0xFF151522),
       alignment: Alignment.center,
-      child: const Icon(
-        Icons.music_note_rounded,
-        color: _cyan,
-        size: 28,
-      ),
+      child: const Icon(Icons.music_note_rounded, color: _cyan, size: 28),
     );
   }
 

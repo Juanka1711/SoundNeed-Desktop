@@ -1,4 +1,4 @@
-
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
 
 const Color _hover = Color(0xFF202025);
@@ -26,7 +26,7 @@ class SoundNeedSidebar extends StatelessWidget {
   final ValueChanged<String> onNavigate;
 
   static const Color _background = Color(0xFF0B0B0E);
-  static const Color _surface = Color(0xFF0B0B0E);
+  static const Color _surface = Colors.transparent;
   static const Color _border = Color(0xFF29292F);
   static const Color _primaryText = Color(0xFFF5F5F7);
 
@@ -34,21 +34,13 @@ class SoundNeedSidebar extends StatelessWidget {
   Widget build(BuildContext context) {
     return Container(
       width: compact ? 84 : 254,
-      padding: EdgeInsets.fromLTRB(
-        compact ? 9 : 13,
-        0,
-        compact ? 9 : 13,
-        4,
-      ),
+      padding: EdgeInsets.fromLTRB(compact ? 9 : 13, 0, compact ? 9 : 13, 4),
       color: Colors.transparent,
       child: Container(
         decoration: BoxDecoration(
           color: _surface,
           borderRadius: BorderRadius.circular(24),
-          border: Border.all(
-            color: _border.withValues(alpha: 0.85),
-            width: 1,
-          ),
+          border: Border.all(color: _border.withValues(alpha: 0.85), width: 1),
           boxShadow: const [
             BoxShadow(
               color: Color(0x22000000),
@@ -65,57 +57,53 @@ class SoundNeedSidebar extends StatelessWidget {
             compact ? 8 : 12,
             18,
           ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              _buildBrand(),
-              const SizedBox(height: 30),
+          child: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildBrand(),
+                const SizedBox(height: 30),
 
-              _buildSectionLabel('BIBLIOTECA'),
-              const SizedBox(height: 9),
+                _buildSectionLabel('BIBLIOTECA'),
+                const SizedBox(height: 9),
 
-              _navItem(context, Icons.home_rounded, 'Inicio'),
-              _navItem(context, Icons.library_music_rounded, 'Tu música'),
-              _navItem(context, Icons.favorite_rounded, 'Favoritos'),
+                _navItem(context, CupertinoIcons.house, 'Inicio'),
+                _navItem(context, CupertinoIcons.music_note_list, 'Tu música'),
+                _navItem(context, CupertinoIcons.heart, 'Favoritos'),
 
-              const SizedBox(height: 25),
+                const SizedBox(height: 25),
 
-              _buildSectionLabel('EXPLORAR'),
-              const SizedBox(height: 9),
+                _buildSectionLabel('EXPLORAR'),
+                const SizedBox(height: 9),
 
-              _navItem(context, Icons.album_rounded, 'Álbumes'),
-              _navItem(context, Icons.people_alt_rounded, 'Artistas'),
-              _navItem(context, Icons.queue_music_rounded, 'Playlists'),
+                _navItem(context, CupertinoIcons.circle_grid_3x3, 'Álbumes'),
+                _navItem(context, CupertinoIcons.person_2, 'Artistas'),
+                _navItem(context, CupertinoIcons.music_note_list, 'Playlists'),
 
-              if (section == 'Playlists' && !compact) ...[
-                const SizedBox(height: 7),
-                Padding(
-                  padding: const EdgeInsets.only(left: 12),
-                  child: Container(
-                    width: 2,
-                    height: playlistNames.isEmpty
-                        ? 0
-                        : (playlistNames.length * 33.0).clamp(0, 165),
-                    decoration: BoxDecoration(
-                      color: accentColor.withValues(alpha: 0.65),
-                      borderRadius: BorderRadius.circular(2),
+                if (section == 'Playlists' && !compact) ...[
+                  const SizedBox(height: 7),
+                  Padding(
+                    padding: const EdgeInsets.only(left: 12),
+                    child: Container(
+                      width: 2,
+                      height: playlistNames.isEmpty
+                          ? 0
+                          : (playlistNames.length * 33.0).clamp(0, 165),
+                      decoration: BoxDecoration(
+                        color: accentColor.withValues(alpha: 0.65),
+                        borderRadius: BorderRadius.circular(2),
+                      ),
                     ),
                   ),
-                ),
-                ...playlistNames.map(
-                  (name) => Padding(
-                    padding: const EdgeInsets.only(left: 8),
-                    child: _navItem(
-                      context,
-                      Icons.circle,
-                      name,
-                      small: true,
+                  ...playlistNames.map(
+                    (name) => Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: _navItem(context, Icons.circle, name, small: true),
                     ),
                   ),
-                ),
+                ],
               ],
-
-            ],
+            ),
           ),
         ),
       ),
@@ -126,8 +114,9 @@ class SoundNeedSidebar extends StatelessWidget {
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: compact ? 0 : 3),
       child: Row(
-        mainAxisAlignment:
-            compact ? MainAxisAlignment.center : MainAxisAlignment.start,
+        mainAxisAlignment: compact
+            ? MainAxisAlignment.center
+            : MainAxisAlignment.start,
         children: [
           Container(
             width: 39,
@@ -174,13 +163,7 @@ class SoundNeedSidebar extends StatelessWidget {
     if (compact) {
       return Padding(
         padding: const EdgeInsets.only(bottom: 8),
-        child: Center(
-          child: Container(
-            width: 22,
-            height: 1,
-            color: _border,
-          ),
-        ),
+        child: Center(child: Container(width: 22, height: 1, color: _border)),
       );
     }
 
@@ -205,8 +188,7 @@ class SoundNeedSidebar extends StatelessWidget {
     bool small = false,
   }) {
     final selected =
-        section == label ||
-        (section == 'Playlists' && label == playlistView);
+        section == label || (section == 'Playlists' && label == playlistView);
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 4),
@@ -272,8 +254,8 @@ class _SidebarNavButtonState extends State<_SidebarNavButton> {
           color: active
               ? widget.accentColor.withValues(alpha: 0.13)
               : _hovered
-                  ? _hover
-                  : Colors.transparent,
+              ? _hover
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(13),
           border: Border.all(
             color: active
@@ -308,9 +290,7 @@ class _SidebarNavButtonState extends State<_SidebarNavButton> {
                   Icon(
                     widget.icon,
                     size: widget.small ? 10 : 19,
-                    color: active
-                        ? widget.accentColor
-                        : widget.mutedColor,
+                    color: active ? widget.accentColor : widget.mutedColor,
                   ),
                   if (!compact) ...[
                     SizedBox(width: widget.small ? 9 : 11),
@@ -320,9 +300,7 @@ class _SidebarNavButtonState extends State<_SidebarNavButton> {
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          color: active
-                              ? Colors.white
-                              : widget.mutedColor,
+                          color: active ? Colors.white : widget.mutedColor,
                           fontSize: widget.small ? 11 : 12,
                           fontWeight: active
                               ? FontWeight.w600

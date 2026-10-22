@@ -1,5 +1,6 @@
 #include "flutter_window.h"
 
+#include <dwmapi.h>
 #include <optional>
 #include <windowsx.h>
 
@@ -92,15 +93,36 @@ LRESULT
 FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
                               WPARAM const wparam,
                               LPARAM const lparam) noexcept {
+  // Windows reapplies its accent-colored frame when an unmaximized window
+  // becomes active. Use the app's near-black edge instead.
+  if (message == WM_ACTIVATE || message == WM_NCACTIVATE) {
+    const COLORREF border_color = RGB(18, 18, 24);
+    DwmSetWindowAttribute(hwnd, DWMWA_BORDER_COLOR, &border_color,
+                          sizeof(border_color));
+  }
+
+  // Paint the dark client background before forwarding messages to Flutter.
+  // This prevents Windows from briefly exposing a white erase frame when the
+  // window regains focus and its Flutter surface is repainted.
+  if (message == WM_ERASEBKGND) {
+    RECT client_area = GetClientArea();
+    FillRect(reinterpret_cast<HDC>(wparam), &client_area,
+             reinterpret_cast<HBRUSH>(GetStockObject(BLACK_BRUSH)));
+    return 1;
+  }
+
   // Let Windows own the move loop started from the custom Flutter title area.
   if (message == WM_NCLBUTTONDOWN && wparam == HTCAPTION) {
     return DefWindowProc(hwnd, message, wparam, lparam);
   }
 
-  // Remove the non-client frame so the Flutter surface reaches the exact
-  // window bounds. The custom WM_NCHITTEST handling below keeps resize edges.
+  // Keep a native resize frame while restored so Windows shows the resize
+  // cursor. When maximized, remove it so Flutter fills the monitor work area.
   if (message == WM_NCCALCSIZE) {
-    return 0;
+    if (IsZoomed(hwnd)) {
+      return 0;
+    }
+    return DefWindowProc(hwnd, message, wparam, lparam);
   }
 
   if (message == WM_GETMINMAXINFO) {
@@ -154,7 +176,9 @@ FlutterWindow::MessageHandler(HWND hwnd, UINT const message,
 
   switch (message) {
     case WM_FONTCHANGE:
-      flutter_controller_->engine()->ReloadSystemFonts();
+      if (flutter_controller_ && flutter_controller_->engine()) {
+        flutter_controller_->engine()->ReloadSystemFonts();
+      }
       break;
   }
 

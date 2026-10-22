@@ -1,6 +1,6 @@
-
 import 'dart:io';
 
+import 'package:flutter/cupertino.dart';
 import 'package:flutter/gestures.dart' show kPrimaryButton;
 import 'package:flutter/material.dart';
 
@@ -68,7 +68,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
 
   bool _searchFocused = false;
 
-    static const Color _background = Colors.transparent;
+  static const Color _background = Colors.transparent;
   static const Color _surface = Color(0xFF141417);
   static const Color _hover = Color(0xFF242428);
   static const Color _border = Color(0xFF29292F);
@@ -120,37 +120,39 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
   Widget build(BuildContext context) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final compact = widget.compact || constraints.maxWidth < 760;
-        final veryCompact = constraints.maxWidth < 540;
+        final width = constraints.maxWidth;
+        final compact = widget.compact || width < 760;
+        final veryCompact = width < 540;
+        final ultraCompact = width < 360;
 
         return Listener(
           onPointerDown: _handlePointerDown,
           child: Container(
             height: 76,
-            padding: EdgeInsets.only(
-              left: veryCompact ? 10 : 20,
-              right: 0,
-            ),
+            padding: EdgeInsets.only(left: veryCompact ? 8 : 20, right: 0),
             decoration: const BoxDecoration(color: _background),
             child: Row(
               children: [
-                _buildBrand(compact: compact),
-                SizedBox(width: veryCompact ? 10 : 22),
-                _buildHomeButton(),
-                SizedBox(width: veryCompact ? 10 : 18),
+                if (!ultraCompact) ...[
+                  _buildBrand(compact: compact),
+                  SizedBox(width: veryCompact ? 8 : 22),
+                  _buildHomeButton(),
+                  SizedBox(width: veryCompact ? 8 : 18),
+                ],
                 Expanded(
-                  child: Center(
-                    child: _buildSearch(compact: compact),
+                  child: Padding(
+                    padding: EdgeInsets.only(right: veryCompact ? 6 : 18),
+                    child: _buildSearch(compact: true),
                   ),
                 ),
-                SizedBox(width: veryCompact ? 8 : 18),
-                _buildImportButton(
-                  key: _filesKey,
-                  icon: Icons.library_music_rounded,
-                  tooltip: 'Importar archivos',
-                  onPressed: widget.onImportFiles,
-                ),
-                if (!compact) ...[
+                if (!ultraCompact)
+                  _buildImportButton(
+                    key: _filesKey,
+                    icon: Icons.library_music_rounded,
+                    tooltip: 'Importar archivos',
+                    onPressed: widget.onImportFiles,
+                  ),
+                if (!compact && width >= 900) ...[
                   const SizedBox(width: 8),
                   _buildImportButton(
                     key: _folderKey,
@@ -159,8 +161,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
                     onPressed: widget.onImportFolder,
                   ),
                 ],
-                const SizedBox(width: 18),
-                _buildWindowControls(),
+                if (width >= 320) _buildWindowControls(),
               ],
             ),
           ),
@@ -182,11 +183,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
             border: Border.all(color: _border),
           ),
           child: const Center(
-            child: Icon(
-              Icons.graphic_eq_rounded,
-              color: _text,
-              size: 23,
-            ),
+            child: Icon(CupertinoIcons.waveform, color: _text, size: 23),
           ),
         ),
         if (!compact) ...[
@@ -224,13 +221,11 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
   Widget _buildHomeButton() {
     return _circleButton(
       key: _homeKey,
-      icon: Icons.home_rounded,
+      icon: CupertinoIcons.house,
       tooltip: 'Inicio',
       onPressed: widget.onHome,
       size: 42,
-      background: widget.section.toLowerCase() == 'home'
-          ? _hover
-          : _surface,
+      background: widget.section.toLowerCase() == 'home' ? _hover : _surface,
     );
   }
 
@@ -238,7 +233,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
     return Container(
       key: _searchKey,
       height: 44,
-      constraints: const BoxConstraints(maxWidth: 570),
+      constraints: const BoxConstraints(maxWidth: 570, minWidth: 0),
       decoration: BoxDecoration(
         color: _surface,
         borderRadius: BorderRadius.circular(30),
@@ -250,7 +245,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
         children: [
           const SizedBox(width: 16),
           Icon(
-            Icons.search_rounded,
+            CupertinoIcons.search,
             color: _searchFocused ? _text : _muted,
             size: 21,
           ),
@@ -265,19 +260,13 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
               child: TextField(
                 controller: widget.searchController,
                 onChanged: widget.onSearchChanged,
-                style: const TextStyle(
-                  color: _text,
-                  fontSize: 13,
-                ),
+                style: const TextStyle(color: _text, fontSize: 13),
                 cursorColor: _text,
                 decoration: InputDecoration(
                   hintText: compact
                       ? 'Buscar música...'
                       : 'Buscar canciones, artistas o álbumes',
-                  hintStyle: const TextStyle(
-                    color: _muted,
-                    fontSize: 12,
-                  ),
+                  hintStyle: const TextStyle(color: _muted, fontSize: 12),
                   border: InputBorder.none,
                   enabledBorder: InputBorder.none,
                   focusedBorder: InputBorder.none,
@@ -297,11 +286,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
                   widget.searchController.clear();
                   widget.onSearchChanged('');
                 },
-                icon: const Icon(
-                  Icons.close_rounded,
-                  color: _muted,
-                  size: 17,
-                ),
+                icon: const Icon(Icons.close_rounded, color: _muted, size: 17),
               ),
             )
           else
@@ -315,14 +300,14 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
     final label = widget.scanning
         ? 'Analizando'
         : widget.onlineMode
-            ? 'En línea'
-            : 'Biblioteca';
+        ? 'En línea'
+        : 'Biblioteca';
 
     final color = widget.scanning
         ? widget.accentColor
         : widget.onlineMode
-            ? _green
-            : _muted;
+        ? _green
+        : _muted;
 
     return Row(
       mainAxisSize: MainAxisSize.min,
@@ -330,10 +315,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
         Container(
           width: 7,
           height: 7,
-          decoration: BoxDecoration(
-            color: color,
-            shape: BoxShape.circle,
-          ),
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
         ),
         if (!compact) ...[
           const SizedBox(width: 8),
@@ -371,7 +353,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
       children: [
         _circleButton(
           key: _minimizeKey,
-          icon: Icons.remove_rounded,
+          icon: CupertinoIcons.minus,
           tooltip: 'Minimizar',
           onPressed: widget.onMinimize,
           size: 34,
@@ -385,8 +367,8 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
         _circleButton(
           key: _maximizeKey,
           icon: widget.maximized
-              ? Icons.filter_none_rounded
-              : Icons.crop_square_rounded,
+              ? CupertinoIcons.square_on_square
+              : CupertinoIcons.square,
           tooltip: widget.maximized ? 'Restaurar' : 'Maximizar',
           onPressed: widget.onToggleMaximize,
           size: 34,
@@ -399,7 +381,7 @@ class _SoundNeedTopBarState extends State<SoundNeedTopBar> {
         ),
         _circleButton(
           key: _closeKey,
-          icon: Icons.close_rounded,
+          icon: CupertinoIcons.xmark,
           tooltip: 'Cerrar',
           onPressed: widget.onClose,
           size: 34,
@@ -506,9 +488,7 @@ class _CircleButtonState extends State<_CircleButton> {
             color: Colors.transparent,
             child: InkWell(
               customBorder: widget.square
-                  ? RoundedRectangleBorder(
-                      borderRadius: BorderRadius.zero,
-                    )
+                  ? RoundedRectangleBorder(borderRadius: BorderRadius.zero)
                   : const CircleBorder(),
               onTap: widget.onPressed,
               child: Center(
