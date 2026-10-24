@@ -2827,11 +2827,11 @@ class _LibraryScreenState extends State<LibraryScreen> {
       );
       await _videoPlayer.setVolume(0);
       if (!mounted || requestId != _videoPlaybackRequestId) return;
-      // The video starts as soon as it opens. Seek the extracted audio to its
-      // actual current position, then keep it aligned while both play.
+      // Keep the song where it already is. The video joins at the audio's
+      // current position instead of seeking the audio back to the start.
       try {
-        await _player.seek(_videoPlayer.state.position);
-        await _player.play();
+        await _videoPlayer.seek(_player.position);
+        if (!_player.playing) await _player.play();
         _startVideoAudioSync();
       } catch (error, stackTrace) {
         debugPrint('No se pudo sincronizar el audio extraído: $error');
