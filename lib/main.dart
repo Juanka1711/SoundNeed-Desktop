@@ -1436,10 +1436,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   }
 
   Future<void> _seekMiniPlayer(Duration position) async {
+    await _player.seek(position);
     if (_videoMode) {
       await _videoPlayer.seek(position);
     }
-    await _player.seek(position);
   }
 
   Future<_ResolvedOnlineAudio?> _resolveNativeOnlineAudio(
@@ -2868,15 +2868,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final audioPosition = _player.position;
       if ((videoPosition - audioPosition).inMilliseconds.abs() < 250) return;
       _videoAudioSyncInProgress = true;
-      unawaited(_correctVideoAudioDrift(videoPosition));
+      unawaited(_correctVideoPositionFromAudio(audioPosition));
     });
   }
 
-  Future<void> _correctVideoAudioDrift(Duration videoPosition) async {
+  Future<void> _correctVideoPositionFromAudio(Duration audioPosition) async {
     try {
-      await _player.seek(videoPosition);
+      await _videoPlayer.seek(audioPosition);
     } catch (error) {
-      debugPrint('Error al corregir sincronía de audio/video: $error');
+      debugPrint('Error al ajustar el video al audio: $error');
     } finally {
       _videoAudioSyncInProgress = false;
     }
