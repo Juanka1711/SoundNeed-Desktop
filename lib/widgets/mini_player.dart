@@ -3,7 +3,6 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/cupertino.dart';
 import 'package:flutter/material.dart';
-import 'package:just_audio/just_audio.dart';
 
 class MiniPlayer extends StatefulWidget {
   const MiniPlayer({
@@ -15,7 +14,8 @@ class MiniPlayer extends StatefulWidget {
     this.artworkProvider,
     required this.isFavorite,
     required this.onToggleFavorite,
-    required this.playerStateStream,
+    required this.playingStream,
+    required this.initialPlaying,
     required this.loading,
     required this.onTogglePlayback,
     required this.shuffleEnabled,
@@ -49,7 +49,8 @@ class MiniPlayer extends StatefulWidget {
   final ImageProvider? artworkProvider;
   final bool isFavorite;
   final VoidCallback? onToggleFavorite;
-  final Stream<PlayerState> playerStateStream;
+  final Stream<bool> playingStream;
+  final bool initialPlaying;
   final bool loading;
   final ValueChanged<bool> onTogglePlayback;
   final bool shuffleEnabled;
@@ -327,10 +328,11 @@ class _MiniPlayerState extends State<MiniPlayer> {
           iconSize: 24,
         ),
         const SizedBox(width: 5),
-        StreamBuilder<PlayerState>(
-          stream: widget.playerStateStream,
+        StreamBuilder<bool>(
+          stream: widget.playingStream,
+          initialData: widget.initialPlaying,
           builder: (context, snapshot) {
-            final playing = snapshot.data?.playing ?? false;
+            final playing = snapshot.data ?? false;
             final totalMs = widget.duration?.inMilliseconds ?? 0;
 
             final progress = totalMs <= 0

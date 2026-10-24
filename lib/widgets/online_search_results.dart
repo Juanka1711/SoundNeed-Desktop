@@ -7,6 +7,7 @@ class OnlineSearchResult {
     required this.artist,
     required this.thumbnail,
     required this.durationSeconds,
+    this.rank,
   });
 
   final String videoId;
@@ -14,6 +15,7 @@ class OnlineSearchResult {
   final String artist;
   final String thumbnail;
   final int durationSeconds;
+  final int? rank;
 }
 
 class OnlineSearchResults extends StatelessWidget {

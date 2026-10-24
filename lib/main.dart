@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'dart:ui' as ui;
 
 import 'package:audio_metadata_reader/audio_metadata_reader.dart';
 import 'package:crypto/crypto.dart';
@@ -10,6 +11,8 @@ import 'package:flutter/foundation.dart' show compute;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart' show MethodChannel;
 import 'package:just_audio/just_audio.dart';
+import 'package:media_kit/media_kit.dart' hide PlayerState;
+import 'package:media_kit_video/media_kit_video.dart' as media_video;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:youtube_explode_dart/youtube_explode_dart.dart';
@@ -24,7 +27,9 @@ import 'widgets/library_content.dart';
 import 'widgets/middle_content_panel.dart';
 import 'widgets/mini_player.dart';
 import 'widgets/now_playing_panel.dart';
+import 'widgets/ambient_album_background.dart';
 import 'widgets/online_search_results.dart';
+import 'services/home_discovery_service.dart';
 import 'widgets/soundneed_sidebar.dart';
 import 'widgets/soundneed_top_bar.dart';
 
@@ -101,6 +106,9 @@ class _OnlineTrack {
     required this.artist,
     required this.thumbnail,
     required this.durationSeconds,
+    this.chartRank,
+    this.chartKey,
+    this.directAudioUrl,
   });
 
   final String videoId;
@@ -108,6 +116,9 @@ class _OnlineTrack {
   final String artist;
   final String thumbnail;
   final int durationSeconds;
+  final int? chartRank;
+  final String? chartKey;
+  final String? directAudioUrl;
 }
 
 class _HomeOnlineCategory {
@@ -190,7 +201,11 @@ List<_ScannedTrack> _scanFiles(List<String> paths) {
   return tracks;
 }
 
-void main() => runApp(const SoundNeedApp());
+void main() {
+  WidgetsFlutterBinding.ensureInitialized();
+  MediaKit.ensureInitialized();
+  runApp(const SoundNeedApp());
+}
 
 class SoundNeedApp extends StatelessWidget {
   const SoundNeedApp({super.key});
@@ -232,6 +247,12 @@ class LibraryScreen extends StatefulWidget {
 
 class _LibraryScreenState extends State<LibraryScreen> {
   final AudioPlayer _player = AudioPlayer();
+  late final Stream<bool> _audioPlayingStream = _player.playerStateStream.map(
+    (state) => state.playing,
+  );
+  final Player _videoPlayer = Player();
+  late final media_video.VideoController _videoController =
+      media_video.VideoController(_videoPlayer);
   final YoutubeExplode _youtube = YoutubeExplode(
     httpClient: _SoundNeedYoutubeHttpClient(),
   );
@@ -244,6 +265,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
   List<_OnlineTrack> _onlinePlaybackQueue = const [];
   final Map<String, _ResolvedOnlineAudio> _prefetchedOnlineAudio = {};
   final Map<String, Future<_ResolvedOnlineAudio?>> _onlineExtractionJobs = {};
+  final Map<String, _OnlineTrack> _resolvedHomeChartTracks = {};
   int _onlineQueueIndex = -1;
   bool _onlineAdvancing = false;
   String _section = 'Inicio';
@@ -256,6 +278,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
   bool _loopEnabled = false;
   bool _onlineSearching = false;
   bool _onlinePlaybackLoading = false;
+  bool _videoMode = false;
+  bool _videoLoading = false;
+  int _videoPlaybackRequestId = 0;
+  Timer? _videoAudioSyncTimer;
+  bool _videoAudioSyncInProgress = false;
+  bool _closing = false;
   bool _windowMaximized = Platform.isWindows;
   String? _error;
   String? _onlineError;
@@ -271,10 +299,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
   final _HomeOnlineCategory _discoverMusic = _HomeOnlineCategory(
     'Nuevos lanzamientos música latina 2026',
   );
-  final _HomeOnlineCategory _podcastSuggestions = _HomeOnlineCategory(
-    'Podcasts Colombia entrevistas música',
-  );
-  Duration _position = Duration.zero;
+  List<HomeChartTrack> _colombiaTop = const [];
+  List<HomeChartTrack> _worldTop = const [];
+  String? _resolvingChartKey;
+  final ValueNotifier<Duration> _position = ValueNotifier(Duration.zero);
   Duration? _duration;
   double _volume = .78;
   StreamSubscription<int?>? _indexSubscription;
@@ -291,15 +319,14 @@ class _LibraryScreenState extends State<LibraryScreen> {
   void initState() {
     super.initState();
     _restore();
-    unawaited(_loadHomeCategory(_colombiaChart));
-    unawaited(_loadHomeCategory(_worldChart));
+    unawaited(_loadHomeChart(_colombiaChart, colombia: true));
+    unawaited(_loadHomeChart(_worldChart, colombia: false));
     unawaited(_loadHomeCategory(_discoverMusic));
-    unawaited(_loadHomeCategory(_podcastSuggestions));
     _indexSubscription = _player.currentIndexStream.listen((index) {
       if (!mounted) return;
       setState(() {
         _currentIndex = index;
-        _position = Duration.zero;
+        _position.value = Duration.zero;
         _duration = _player.duration;
       });
     });
@@ -307,7 +334,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (mounted) setState(() => _duration = duration);
     });
     _positionSubscription = _player.positionStream.listen((position) {
-      if (mounted) setState(() => _position = position);
+      _position.value = position;
     });
     _errorSubscription = _player.errorStream.listen((error) {
       final online = _playingOnlineTrack != null;
@@ -554,6 +581,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
     bool autoplay = true,
   }) async {
     if (tracks.isEmpty) return;
+    final keepVideoMode = _videoMode;
+    if (keepVideoMode) {
+      _videoPlaybackRequestId++;
+      _videoAudioSyncTimer?.cancel();
+      await _videoPlayer.stop();
+    }
     _onlinePlaybackRequestId++;
     _playingOnlineTrack = null;
     _onlinePlaybackLoading = false;
@@ -577,6 +610,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       await prefs.setString('lastTrack.v1', tracks[startAt].path);
       if (autoplay) await _player.play();
       if (mounted) setState(() {});
+      if (keepVideoMode && autoplay && mounted) {
+        unawaited(_playVideoPreview(tracks[startAt], null));
+      }
     } catch (error) {
       if (mounted)
         setState(
@@ -853,11 +889,367 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
   }
 
+  Future<void> _loadHomeChart(
+    _HomeOnlineCategory category, {
+    required bool colombia,
+    bool refresh = false,
+  }) async {
+    if (mounted) {
+      setState(() {
+        category.loading = true;
+        category.error = null;
+      });
+    }
+    try {
+      final chart = colombia
+          ? await HomeChartsService.instance.loadColombia(refresh: refresh)
+          : await HomeChartsService.instance.loadWorld(refresh: refresh);
+      if (!mounted) return;
+      final visibleChart = chart.take(30).toList(growable: false);
+      setState(() {
+        if (colombia) {
+          _colombiaTop = visibleChart;
+          category.tracks = visibleChart
+              .skip(1)
+              .map(_chartTrackToOnlineTrack)
+              .toList(growable: false);
+        } else {
+          _worldTop = visibleChart;
+          category.tracks = visibleChart
+              .map(_chartTrackToOnlineTrack)
+              .toList(growable: false);
+        }
+        category.loading = false;
+        category.error = category.tracks.isEmpty
+            ? 'No se pudo cargar el chart. Intenta actualizar.'
+            : null;
+      });
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        category.loading = false;
+        category.error = category.tracks.isEmpty
+            ? 'No se pudo cargar el chart. Revisa tu conexión.'
+            : null;
+      });
+    }
+  }
+
+  _OnlineTrack _chartTrackToOnlineTrack(HomeChartTrack track) => _OnlineTrack(
+    videoId: 'chart:${track.id}',
+    title: track.title,
+    artist: track.artist,
+    thumbnail: track.artworkUrl,
+    durationSeconds: 0,
+    chartRank: track.rank,
+    chartKey: 'chart:${track.id}',
+  );
+
+  Future<void> _playHomeChartTrack(
+    HomeChartTrack chartTrack, {
+    required List<HomeChartTrack> chart,
+  }) async {
+    final chartKey = 'chart:${chartTrack.id}';
+    setState(() => _resolvingChartKey = chartKey);
+    try {
+      final selected = await _resolveHomeChartTrack(chartTrack);
+      if (!mounted) return;
+      if (selected == null) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text(
+              'No encontramos una versión que coincida con esta canción.',
+            ),
+          ),
+        );
+        return;
+      }
+      await _playOnlineTrack(selected, queue: [selected], queueIndex: 0);
+      final playbackRequestId = _onlinePlaybackRequestId;
+      unawaited(
+        _extendHomeChartQueue(chartTrack, chart, selected, playbackRequestId),
+      );
+    } catch (_) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('No se pudo buscar este tema ahora.')),
+      );
+    } finally {
+      if (mounted && _resolvingChartKey == chartKey) {
+        setState(() => _resolvingChartKey = null);
+      }
+    }
+  }
+
+  String _normalizeChartText(String value) => value
+      .toLowerCase()
+      .replaceAll('á', 'a')
+      .replaceAll('é', 'e')
+      .replaceAll('í', 'i')
+      .replaceAll('ó', 'o')
+      .replaceAll('ú', 'u')
+      .replaceAll('ü', 'u')
+      .replaceAll('ñ', 'n')
+      .replaceAll(
+        RegExp(r'\b(topic|official|audio|video|lyrics?|vevo|visualizer)\b'),
+        ' ',
+      )
+      .replaceAll(RegExp(r'[^a-z0-9]+'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+
+  Set<String> _chartWords(String value) =>
+      _normalizeChartText(value)
+          .split(' ')
+          .where((word) => word.length > 1)
+          .toSet();
+
+  double _chartTitleMatch(String resultTitle, String wantedTitle) {
+    final result = _normalizeChartText(resultTitle);
+    final wanted = _normalizeChartText(wantedTitle);
+    if (result.isEmpty || wanted.isEmpty) return 0;
+    if (result == wanted) return 1;
+    final wantedWords = _chartWords(wanted);
+    if (wantedWords.isEmpty) return 0;
+    return _chartWords(result).intersection(wantedWords).length /
+        wantedWords.length;
+  }
+
+  double _chartArtistMatch(
+    String resultTitle,
+    String resultArtist,
+    String artist,
+  ) {
+    const ignored = {
+      'and',
+      'y',
+      'feat',
+      'ft',
+      'con',
+      'de',
+      'del',
+      'la',
+      'las',
+      'el',
+      'los',
+      'the',
+    };
+    final wantedWords = _chartWords(artist)..removeAll(ignored);
+    if (wantedWords.isEmpty) return 0;
+    final resultWords = _chartWords('$resultTitle $resultArtist');
+    return resultWords.intersection(wantedWords).length / wantedWords.length;
+  }
+
+  double _chartVersionPenalty(String title, String wantedTitle) {
+    const variantTokens = {
+      'live',
+      'remix',
+      'acoustic',
+      'cover',
+      'karaoke',
+      'nightcore',
+      'slowed',
+      'reverb',
+      'sped',
+      'instrumental',
+      'extended',
+      '8d',
+    };
+    final resultWords = _chartWords(title);
+    final wantedWords = _chartWords(wantedTitle);
+    return resultWords
+            .difference(wantedWords)
+            .intersection(variantTokens)
+            .isEmpty
+        ? 0
+        : .45;
+  }
+
+  String _homeChartTrackKey(HomeChartTrack track) =>
+      '${_normalizeChartText(track.title)}|${_normalizeChartText(track.artist)}';
+
+  Future<_OnlineTrack?> _resolveHomeChartTrack(HomeChartTrack track) async {
+    if (track.title.trim().isEmpty || track.artist.trim().isEmpty) return null;
+    final key = _homeChartTrackKey(track);
+    final cached = _resolvedHomeChartTracks[key];
+    if (cached != null) {
+      return _OnlineTrack(
+        videoId: cached.videoId,
+        title: cached.title,
+        artist: cached.artist,
+        thumbnail: track.artworkUrl.isNotEmpty
+            ? track.artworkUrl
+            : cached.thumbnail,
+        durationSeconds: cached.durationSeconds,
+        chartKey: 'chart:${track.id}',
+      );
+    }
+
+    final candidates = <dynamic>[];
+    final seenVideoIds = <String>{};
+    final queries = [
+      '${track.title} ${track.artist} audio',
+      '${track.title} ${track.artist}',
+      track.title,
+    ];
+    for (final query in queries) {
+      try {
+        final batch = await _youtube.search
+            .search(query)
+            .timeout(const Duration(seconds: 18));
+        var confidentCanonicalMatch = false;
+        for (final candidate in batch) {
+          if (candidate.id.value.isNotEmpty &&
+              seenVideoIds.add(candidate.id.value)) {
+            candidates.add(candidate);
+          }
+          confidentCanonicalMatch =
+              confidentCanonicalMatch ||
+              (_chartTitleMatch(candidate.title, track.title) >= .72 &&
+                  _chartArtistMatch(
+                        candidate.title,
+                        candidate.author,
+                        track.artist,
+                      ) >=
+                      .25 &&
+                  _chartVersionPenalty(candidate.title, track.title) == 0);
+        }
+        if (confidentCanonicalMatch) break;
+      } catch (_) {
+        // Try the next query form; a single failed search should not end resolution.
+      }
+    }
+    if (candidates.isEmpty) return null;
+
+    dynamic best;
+    var bestScore = -1.0;
+    var bestTitleScore = 0.0;
+    var bestArtistScore = 0.0;
+    for (final candidate in candidates) {
+      final titleScore = _chartTitleMatch(candidate.title, track.title);
+      final artistScore = _chartArtistMatch(
+        candidate.title,
+        candidate.author,
+        track.artist,
+      );
+      final score =
+          titleScore * .7 +
+          artistScore * .3 -
+          _chartVersionPenalty(candidate.title, track.title);
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+        bestTitleScore = titleScore;
+        bestArtistScore = artistScore;
+      }
+    }
+
+    // Refuse weak matches instead of silently playing a different song.
+    if (best == null ||
+        !(bestTitleScore >= .72 && bestArtistScore >= .25) &&
+            !(bestTitleScore >= .9 && bestArtistScore == 0) ||
+        bestScore < .7) {
+      return null;
+    }
+    final resolved = _OnlineTrack(
+      videoId: best.id.value,
+      title: best.title,
+      artist: best.author,
+      thumbnail: track.artworkUrl.isNotEmpty
+          ? track.artworkUrl
+          : best.thumbnails.highResUrl,
+      durationSeconds: best.duration?.inSeconds ?? 0,
+      chartKey: 'chart:${track.id}',
+    );
+    _resolvedHomeChartTracks[key] = resolved;
+    return resolved;
+  }
+
+  Future<void> _extendHomeChartQueue(
+    HomeChartTrack current,
+    List<HomeChartTrack> chart,
+    _OnlineTrack selected,
+    int playbackRequestId,
+  ) async {
+    final start = chart.indexWhere((track) => track.id == current.id);
+    if (start < 0) return;
+    final ordered = [...chart.skip(start), ...chart.take(start)];
+    final uniqueTracks = <HomeChartTrack>[];
+    final seenSongs = <String>{};
+    for (final track in ordered) {
+      if (seenSongs.add(_homeChartTrackKey(track))) uniqueTracks.add(track);
+      if (uniqueTracks.length == 6) break;
+    }
+    final resolved = await Future.wait(
+      uniqueTracks.map((track) => _resolveHomeChartTrack(track)),
+    );
+    final queue = <_OnlineTrack>[];
+    final seenVideoIds = <String>{};
+    final seenResolvedSongs = <String>{};
+    for (var index = 0; index < resolved.length; index++) {
+      final item = resolved[index];
+      if (item == null || !seenVideoIds.add(item.videoId)) continue;
+      final resolvedSongKey =
+          '${_normalizeChartText(item.title)}|${_normalizeChartText(item.artist)}';
+      if (!seenResolvedSongs.add(resolvedSongKey)) continue;
+      queue.add(
+        _OnlineTrack(
+          videoId: item.videoId,
+          title: item.title,
+          artist: item.artist,
+          thumbnail: uniqueTracks[index].artworkUrl.isNotEmpty
+              ? uniqueTracks[index].artworkUrl
+              : item.thumbnail,
+          durationSeconds: item.durationSeconds,
+          chartKey: item.chartKey,
+        ),
+      );
+    }
+    if (queue.isEmpty) queue.add(selected);
+    if (!mounted ||
+        playbackRequestId != _onlinePlaybackRequestId ||
+        _playingOnlineTrack?.videoId != selected.videoId) {
+      return;
+    }
+    setState(() {
+      _onlinePlaybackQueue = queue;
+      _onlineQueueIndex = 0;
+    });
+  }
+
+  Future<void> _playHomePodcastRequest(HomePodcastPlayRequest request) async {
+    if (request.index < 0 || request.index >= request.episodes.length) return;
+    final queue = request.episodes
+        .map(
+          (episode) => _OnlineTrack(
+            videoId: 'podcast:${episode.id}',
+            title: episode.title,
+            artist: episode.showTitle,
+            thumbnail: episode.artworkUrl,
+            durationSeconds: episode.durationSeconds,
+            directAudioUrl: episode.audioUrl,
+          ),
+        )
+        .toList(growable: false);
+    await _playOnlineTrack(
+      queue[request.index],
+      queue: queue,
+      queueIndex: request.index,
+    );
+  }
+
   Future<void> _playOnlineTrack(
     _OnlineTrack track, {
     List<_OnlineTrack>? queue,
     int? queueIndex,
   }) async {
+    final keepVideoMode = _videoMode;
+    if (keepVideoMode) {
+      _videoPlaybackRequestId++;
+      _videoAudioSyncTimer?.cancel();
+      await _videoPlayer.stop();
+    }
+    _videoLoading = false;
     final requestId = ++_onlinePlaybackRequestId;
     _onlineDebounce?.cancel();
     _queue.clear();
@@ -873,18 +1265,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _playingOnlineTrack = track;
       _onlinePlaybackLoading = true;
       _error = null;
-      _position = Duration.zero;
+      _position.value = Duration.zero;
       _duration = null;
     });
     try {
       await _writePlaybackLog('Resolving online audio stream');
       await _player.stop();
-      File? audioFile = await _getCachedOnlineAudio(track);
-      AudioSource? directSource;
+      AudioSource? directSource = track.directAudioUrl == null
+          ? null
+          : AudioSource.uri(Uri.parse(track.directAudioUrl!));
+      File? audioFile = directSource == null
+          ? await _getCachedOnlineAudio(track)
+          : null;
       if (requestId != _onlinePlaybackRequestId) return;
       Object? nativeExtractorError;
 
-      if (audioFile == null) {
+      if (audioFile == null && directSource == null) {
         try {
           final cachedExtraction = _prefetchedOnlineAudio.remove(track.videoId);
           final extracted =
@@ -953,6 +1349,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       _currentIndex = null;
       if (mounted) setState(() => _onlinePlaybackLoading = false);
       await _writePlaybackLog('Audio source loaded; playback requested');
+      if (keepVideoMode && mounted) {
+        unawaited(_playVideoPreview(null, track));
+      }
     } catch (error) {
       if (!mounted || requestId != _onlinePlaybackRequestId) return;
       await _writePlaybackLog('Online playback setup failed: $error');
@@ -984,6 +1383,63 @@ class _LibraryScreenState extends State<LibraryScreen> {
     } finally {
       _onlineAdvancing = false;
     }
+  }
+
+  Future<void> _skipMiniPlayerTrack(int direction) async {
+    final wasVideoMode = _videoMode;
+    final previousIndex = _player.currentIndex;
+    if (wasVideoMode) {
+      _videoPlaybackRequestId++;
+      _videoAudioSyncTimer?.cancel();
+      await _videoPlayer.stop();
+    }
+
+    if (_playingOnlineTrack != null) {
+      await _skipOnlineTrack(direction);
+      return;
+    }
+
+    if (direction < 0) {
+      await _player.seekToPrevious();
+    } else {
+      await _player.seekToNext();
+    }
+    final nextIndex = _player.currentIndex;
+    if (wasVideoMode &&
+        nextIndex != null &&
+        (nextIndex != previousIndex || direction < 0) &&
+        nextIndex >= 0 &&
+        nextIndex < _queue.length &&
+        mounted) {
+      final path = _queue[nextIndex];
+      final nextTrack = _tracks.where((track) => track.path == path).firstOrNull;
+      if (nextTrack != null) await _playVideoPreview(nextTrack, null);
+    }
+  }
+
+  Future<void> _toggleMiniPlayerPlayback(bool wasPlaying) async {
+    if (_videoMode) {
+      if (wasPlaying) {
+        await _videoPlayer.pause();
+        await _player.pause();
+      } else {
+        await _videoPlayer.play();
+        await _player.play();
+      }
+      return;
+    }
+    if (wasPlaying) {
+      await _player.pause();
+    } else {
+      await _player.play();
+    }
+  }
+
+  Future<void> _seekMiniPlayer(Duration position) async {
+    if (_videoMode) {
+      await _videoPlayer.seek(position);
+    }
+    await _player.seek(position);
   }
 
   Future<_ResolvedOnlineAudio?> _resolveNativeOnlineAudio(
@@ -1018,7 +1474,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
     }
     final currentId = _playingOnlineTrack?.videoId;
     final next = _onlinePlaybackQueue[nextIndex];
-    if (next.videoId == currentId) return;
+    if (next.videoId == currentId || next.directAudioUrl != null) return;
 
     final prepared = _prefetchedOnlineAudio[next.videoId];
     if (prepared != null &&
@@ -1271,6 +1727,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   @override
   void dispose() {
+    _videoAudioSyncTimer?.cancel();
     _indexSubscription?.cancel();
     _playerStateSubscription?.cancel();
     _durationSubscription?.cancel();
@@ -1281,8 +1738,10 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _onlineRequestId++;
     _onlinePlaybackRequestId++;
     _search.dispose();
+    _position.dispose();
     _youtube.close();
     _player.dispose();
+    unawaited(_videoPlayer.dispose());
     super.dispose();
   }
 
@@ -1296,6 +1755,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
               .where((track) => track.path == _queue[_currentIndex!])
               .firstOrNull
         : null;
+    final ImageProvider<Object>? ambientArtwork =
+        _playingOnlineTrack != null && _playingOnlineTrack!.thumbnail.isNotEmpty
+        ? NetworkImage(_playingOnlineTrack!.thumbnail)
+        : current?.coverPath == null
+        ? null
+        : FileImage(File(current!.coverPath!));
     return Scaffold(
       backgroundColor: _bg,
       body: LayoutBuilder(
@@ -1306,110 +1771,172 @@ class _LibraryScreenState extends State<LibraryScreen> {
           final showNowPlaying =
               constraints.maxWidth >= 1150 &&
               (current != null || _playingOnlineTrack != null);
-          return Column(
+          return Stack(
+            fit: StackFit.expand,
             children: [
-              SoundNeedTopBar(
-                compact: compact,
-                section: _section,
-                query: _query,
-                searchController: _search,
-                onSearchChanged: _onSearchChanged,
-                scanning: _scanning,
-                onlineMode: _onlineMode,
-                maximized: _windowMaximized,
-                backgroundColor: _bg,
-                surfaceColor: _raised,
-                accentColor: _cyan,
-                mutedColor: _muted,
-                onHome: () => setState(() {
-                  _section = 'Inicio';
-                  _playlistView = null;
-                }),
-                onImportFiles: () => unawaited(_importFiles()),
-                onImportFolder: () => unawaited(_importFolder()),
-                onMinimize: () =>
-                    unawaited(_windowChannel.invokeMethod<void>('minimize')),
-                onToggleMaximize: () => unawaited(_toggleWindowMaximize()),
-                onClose: () =>
-                    unawaited(_windowChannel.invokeMethod<void>('close')),
-                onDragWindow: () =>
-                    unawaited(_windowChannel.invokeMethod<void>('drag')),
-              ),
-              Expanded(
-                child: ColoredBox(
-                  color: Colors.black,
-                  child: Column(
-                    children: [
-                      Expanded(
-                        child: Row(
-                          crossAxisAlignment: CrossAxisAlignment.stretch,
+              const Positioned.fill(child: ColoredBox(color: _bg)),
+              Positioned.fill(
+                child: _videoMode
+                    ? RepaintBoundary(
+                        child: Stack(
+                          fit: StackFit.expand,
                           children: [
-                            SoundNeedSidebar(
-                              compact: compact,
-                              section: _section,
-                              playlistView: _playlistView,
-                              playlistNames: _playlists.keys.toList(),
-                              panelColor: _panel,
-                              accentColor: _cyan,
-                              mutedColor: _muted,
-                              onNavigate: _navigate,
-                            ),
-                            Expanded(
-                              child: _mainContent(compact, showNowPlaying),
-                            ),
-                            AnimatedContainer(
-                              duration: const Duration(milliseconds: 380),
-                              curve: Curves.easeInOutCubic,
-                              width: showNowPlaying ? 326 : 0,
-                              child: ClipRect(
-                                child: SizedBox(
-                                  width: 326,
-                                  child: Padding(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 13,
-                                    ),
-                                    child: AnimatedSlide(
-                                      duration: const Duration(
-                                        milliseconds: 380,
-                                      ),
-                                      curve: Curves.easeInOutCubic,
-                                      offset: showNowPlaying
-                                          ? Offset.zero
-                                          : const Offset(.08, 0),
-                                      child: AnimatedOpacity(
-                                        duration: const Duration(
-                                          milliseconds: 260,
-                                        ),
-                                        curve: Curves.easeOut,
-                                        opacity: showNowPlaying ? 1 : 0,
-                                        child: SizedBox(
-                                          width: 300,
-                                          child: _nowPlayingPanel(current),
-                                        ),
-                                      ),
-                                    ),
+                            FittedBox(
+                              fit: BoxFit.cover,
+                              clipBehavior: Clip.hardEdge,
+                              child: SizedBox(
+                                // Blur at a smaller resolution, then scale the
+                                // softened video to fill the desktop backdrop.
+                                width: 640,
+                                height: 360,
+                                child: ImageFiltered(
+                                  imageFilter: ui.ImageFilter.blur(
+                                    sigmaX: 12,
+                                    sigmaY: 12,
                                   ),
+                                  child: media_video.Video(
+                                    controller: _videoController,
+                                    fit: BoxFit.cover,
+                                    controls: media_video.NoVideoControls,
+                                  ),
+                                ),
+                              ),
+                            ),
+                            const DecoratedBox(
+                              decoration: BoxDecoration(
+                                gradient: LinearGradient(
+                                  begin: Alignment.topCenter,
+                                  end: Alignment.bottomCenter,
+                                  stops: [0, .42, .78, 1],
+                                  colors: [
+                                    Color(0x66000000),
+                                    Color(0xA6000000),
+                                    Color(0xF0000000),
+                                    Colors.black,
+                                  ],
                                 ),
                               ),
                             ),
                           ],
                         ),
-                      ),
-                      Padding(
-                        padding: EdgeInsets.fromLTRB(
-                          compact ? 4 : 10,
-                          12,
-                          compact ? 4 : 10,
-                          12,
-                        ),
-                        child: ClipRRect(
-                          borderRadius: BorderRadius.circular(26),
-                          child: _miniPlayer(current, compact),
+                      )
+                    : Align(
+                        alignment: Alignment.topCenter,
+                        child: SizedBox(
+                          width: double.infinity,
+                          height: constraints.maxHeight * .7,
+                          child: AmbientAlbumBackground(
+                            artwork: ambientArtwork,
+                          ),
                         ),
                       ),
-                    ],
+              ),
+              Column(
+                children: [
+                  SoundNeedTopBar(
+                    compact: compact,
+                    section: _section,
+                    query: _query,
+                    searchController: _search,
+                    onSearchChanged: _onSearchChanged,
+                    scanning: _scanning,
+                    onlineMode: _onlineMode,
+                    maximized: _windowMaximized,
+                    backgroundColor: _bg,
+                    surfaceColor: _raised,
+                    accentColor: _cyan,
+                    mutedColor: _muted,
+                    onHome: () => setState(() {
+                      _section = 'Inicio';
+                      _playlistView = null;
+                    }),
+                    onImportFiles: () => unawaited(_importFiles()),
+                    onImportFolder: () => unawaited(_importFolder()),
+                    onMinimize: () => unawaited(
+                      _windowChannel.invokeMethod<void>('minimize'),
+                    ),
+                    onToggleMaximize: () => unawaited(_toggleWindowMaximize()),
+                    onClose: () => unawaited(_closeApp()),
+                    onDragWindow: () =>
+                        unawaited(_windowChannel.invokeMethod<void>('drag')),
                   ),
-                ),
+                  Expanded(
+                    child: ColoredBox(
+                      color: Colors.transparent,
+                      child: Column(
+                        children: [
+                          Expanded(
+                            child: Row(
+                              crossAxisAlignment: CrossAxisAlignment.stretch,
+                              children: [
+                                SoundNeedSidebar(
+                                  compact: compact,
+                                  section: _section,
+                                  playlistView: _playlistView,
+                                  playlistNames: _playlists.keys.toList(),
+                                  panelColor: _panel,
+                                  accentColor: _cyan,
+                                  mutedColor: _muted,
+                                  onNavigate: _navigate,
+                                ),
+                                Expanded(
+                                  child: _mainContent(compact, showNowPlaying),
+                                ),
+                                AnimatedContainer(
+                                  duration: const Duration(milliseconds: 380),
+                                  curve: Curves.easeInOutCubic,
+                                  width: showNowPlaying ? 326 : 0,
+                                  child: ClipRect(
+                                    child: SizedBox(
+                                      width: 326,
+                                      child: Padding(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 13,
+                                        ),
+                                        child: AnimatedSlide(
+                                          duration: const Duration(
+                                            milliseconds: 380,
+                                          ),
+                                          curve: Curves.easeInOutCubic,
+                                          offset: showNowPlaying
+                                              ? Offset.zero
+                                              : const Offset(.08, 0),
+                                          child: AnimatedOpacity(
+                                            duration: const Duration(
+                                              milliseconds: 260,
+                                            ),
+                                            curve: Curves.easeOut,
+                                            opacity: showNowPlaying ? 1 : 0,
+                                            child: SizedBox(
+                                              width: 300,
+                                              child: _nowPlayingPanel(current),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                          Padding(
+                            padding: EdgeInsets.fromLTRB(
+                              compact ? 4 : 10,
+                              12,
+                              compact ? 4 : 10,
+                              12,
+                            ),
+                            child: ClipRRect(
+                              borderRadius: BorderRadius.circular(26),
+                              child: _miniPlayer(current, compact),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ],
           );
@@ -1422,6 +1949,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
     _HomeOnlineCategory category, {
     required String title,
     required String subtitle,
+    bool ranked = false,
+    ValueChanged<int>? onPlay,
+    VoidCallback? onRefresh,
   }) {
     final results = category.tracks
         .map(
@@ -1431,6 +1961,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
             artist: track.artist,
             thumbnail: track.thumbnail,
             durationSeconds: track.durationSeconds,
+            rank: track.chartRank,
           ),
         )
         .toList(growable: false);
@@ -1441,14 +1972,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
       results: results,
       loading: category.loading,
       error: category.error,
-      onRefresh: () => unawaited(_loadHomeCategory(category, refresh: true)),
-      onPlay: (index) => unawaited(
-        _playOnlineTrack(
-          category.tracks[index],
-          queue: category.tracks,
-          queueIndex: index,
-        ),
-      ),
+      ranked: ranked,
+      onRefresh:
+          onRefresh ??
+          () => unawaited(_loadHomeCategory(category, refresh: true)),
+      onPlay:
+          onPlay ??
+          (index) => unawaited(
+            _playOnlineTrack(
+              category.tracks[index],
+              queue: category.tracks,
+              queueIndex: index,
+            ),
+          ),
     );
   }
 
@@ -1473,7 +2009,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
         ? _searchResultsPanel(tracks, compact)
         : tracks.isEmpty
         ? _emptyState()
-        : _trackTable(tracks, compact);
+        : _trackTable(tracks, compact, neutralHome: _section == 'Inicio');
     final config = LibraryPageConfig(
       compact: compact,
       hasNowPlayingPanel: hasNowPlayingPanel,
@@ -1493,28 +2029,56 @@ class _LibraryScreenState extends State<LibraryScreen> {
         colombiaChart: _homeOnlineSection(
           _colombiaChart,
           title: 'Top Colombia',
-          subtitle: 'Canciones populares en distintos géneros',
+          subtitle: '',
+          ranked: true,
+          onRefresh: () => unawaited(
+            _loadHomeChart(_colombiaChart, colombia: true, refresh: true),
+          ),
+          onPlay: (index) => unawaited(
+            _playHomeChartTrack(_colombiaTop[index + 1], chart: _colombiaTop),
+          ),
         ),
         worldChart: _homeOnlineSection(
           _worldChart,
           title: 'Top mundial',
-          subtitle: 'Éxitos que se escuchan en todo el mundo',
+          subtitle: '',
+          ranked: true,
+          onRefresh: () => unawaited(
+            _loadHomeChart(_worldChart, colombia: false, refresh: true),
+          ),
+          onPlay: (index) => unawaited(
+            _playHomeChartTrack(_worldTop[index], chart: _worldTop),
+          ),
         ),
         discoverMusic: _homeOnlineSection(
           _discoverMusic,
-          title: 'Descubre música',
-          subtitle: 'Lanzamientos y nuevos artistas',
+          title: 'Música del momento',
+          subtitle: '',
         ),
-        podcastSuggestions: _homeOnlineSection(
-          _podcastSuggestions,
-          title: 'Podcasts',
-          subtitle: 'Conversaciones y programas para escuchar',
-        ),
-        playingVideoId: _playingOnlineTrack?.videoId,
+        onPlayPodcast: (request) => unawaited(_playHomePodcastRequest(request)),
+        topTrack: _colombiaTop.isEmpty
+            ? null
+            : OnlineSearchResult(
+                videoId: 'chart:${_colombiaTop.first.id}',
+                title: _colombiaTop.first.title,
+                artist: _colombiaTop.first.artist,
+                thumbnail: _colombiaTop.first.artworkUrl,
+                durationSeconds: 0,
+                rank: _colombiaTop.first.rank,
+              ),
+        onPlayTopTrack: _colombiaTop.isEmpty
+            ? null
+            : () => unawaited(
+                _playHomeChartTrack(_colombiaTop.first, chart: _colombiaTop),
+              ),
+        playingVideoId:
+            _playingOnlineTrack?.chartKey ?? _playingOnlineTrack?.videoId,
         isPlaying: _player.playing,
-        loadingVideoId: _onlinePlaybackLoading
-            ? _playingOnlineTrack?.videoId
-            : null,
+        loadingVideoId:
+            _resolvingChartKey ??
+            (_onlinePlaybackLoading
+                ? _playingOnlineTrack?.chartKey ?? _playingOnlineTrack?.videoId
+                : null),
         continueTitle: _playingOnlineTrack?.title ?? _currentLocalTrack?.title,
         continueArtist:
             _playingOnlineTrack?.artist ?? _currentLocalTrack?.artist,
@@ -1523,7 +2087,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
             : () => unawaited(_player.play()),
         stationArtists: _tracks
             .map((track) => track.artist.trim())
-            .where((artist) => artist.isNotEmpty)
+            .where(
+              (artist) =>
+                  artist.isNotEmpty &&
+                  artist.toLowerCase() != 'artista desconocido' &&
+                  artist.toLowerCase() != 'unknown artist',
+            )
             .toSet()
             .take(6)
             .toList(growable: false),
@@ -1755,11 +2324,19 @@ class _LibraryScreenState extends State<LibraryScreen> {
     ),
   );
 
-  Widget _trackTable(List<Track> tracks, bool compact) => Container(
+  Widget _trackTable(
+    List<Track> tracks,
+    bool compact, {
+    bool neutralHome = false,
+  }) => Container(
     decoration: BoxDecoration(
-      color: _panel.withValues(alpha: .72),
-      borderRadius: BorderRadius.circular(15),
-      border: Border.all(color: Colors.white.withValues(alpha: .045)),
+      color: neutralHome
+          ? const Color(0xFF111111)
+          : _panel.withValues(alpha: .72),
+      borderRadius: BorderRadius.circular(18),
+      border: Border.all(
+        color: Colors.white.withValues(alpha: neutralHome ? .09 : .045),
+      ),
     ),
     child: Column(
       children: [
@@ -1802,16 +2379,29 @@ class _LibraryScreenState extends State<LibraryScreen> {
             ],
           ),
         ),
-        Divider(height: 1, color: Colors.white.withValues(alpha: .05)),
+        Divider(
+          height: 1,
+          color: Colors.white.withValues(alpha: neutralHome ? .08 : .05),
+        ),
         ...List.generate(
           tracks.length,
-          (index) => _trackRow(tracks[index], index, compact),
+          (index) => _trackRow(
+            tracks[index],
+            index,
+            compact,
+            neutralHome: neutralHome,
+          ),
         ),
       ],
     ),
   );
 
-  Widget _trackRow(Track track, int index, bool compact) {
+  Widget _trackRow(
+    Track track,
+    int index,
+    bool compact, {
+    bool neutralHome = false,
+  }) {
     final playing =
         _currentIndex != null &&
         _currentIndex! < _queue.length &&
@@ -1834,13 +2424,15 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     playing
                         ? Icons.equalizer_rounded
                         : Icons.play_arrow_rounded,
-                    color: playing ? _cyan : _muted,
+                    color: playing
+                        ? (neutralHome ? const Color(0xFFF4F3EF) : _cyan)
+                        : _muted,
                     size: 19,
                   ),
                 ),
               ),
             ),
-            _cover(track, 42),
+            _cover(track, 42, neutralHome: neutralHome),
             const SizedBox(width: 12),
             Expanded(
               flex: 5,
@@ -1853,7 +2445,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(
                       fontSize: 12,
-                      color: playing ? _cyan : Colors.white,
+                      color: playing && !neutralHome ? _cyan : Colors.white,
                       fontWeight: FontWeight.w600,
                     ),
                   ),
@@ -1923,30 +2515,34 @@ class _LibraryScreenState extends State<LibraryScreen> {
     );
   }
 
-  Widget _cover(Track track, double size) => ClipRRect(
-    borderRadius: BorderRadius.circular(size * .2),
-    child: SizedBox(
-      width: size,
-      height: size,
-      child: track.coverPath != null && File(track.coverPath!).existsSync()
-          ? Image.file(
-              File(track.coverPath!),
-              fit: BoxFit.cover,
-              errorBuilder: (context, error, stackTrace) =>
-                  _coverPlaceholder(size),
-            )
-          : _coverPlaceholder(size),
-    ),
-  );
+  Widget _cover(Track track, double size, {bool neutralHome = false}) =>
+      ClipRRect(
+        borderRadius: BorderRadius.circular(size * .2),
+        child: SizedBox(
+          width: size,
+          height: size,
+          child: track.coverPath != null && File(track.coverPath!).existsSync()
+              ? Image.file(
+                  File(track.coverPath!),
+                  fit: BoxFit.cover,
+                  errorBuilder: (context, error, stackTrace) =>
+                      _coverPlaceholder(size, neutralHome: neutralHome),
+                )
+              : _coverPlaceholder(size, neutralHome: neutralHome),
+        ),
+      );
 
-  Widget _coverPlaceholder(double size) => Container(
-    color: _raised,
-    child: Icon(
-      Icons.music_note_rounded,
-      color: _cyan.withValues(alpha: .75),
-      size: size * .48,
-    ),
-  );
+  Widget _coverPlaceholder(double size, {bool neutralHome = false}) =>
+      Container(
+        color: neutralHome ? const Color(0xFF242424) : _raised,
+        child: Icon(
+          Icons.music_note_rounded,
+          color: neutralHome
+              ? Colors.white.withValues(alpha: .7)
+              : _cyan.withValues(alpha: .75),
+          size: size * .48,
+        ),
+      );
 
   Widget _miniPlayer(Track? track, bool compact) {
     final onlineTrack = _playingOnlineTrack;
@@ -1986,7 +2582,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
             child: const Icon(Icons.music_note, color: _muted),
           );
 
-    return MiniPlayer(
+    return ValueListenableBuilder<Duration>(
+      valueListenable: _position,
+      builder: (context, position, child) => MiniPlayer(
       compact: compact,
       hasTrack: hasTrack,
       title: track?.title ?? onlineTrack?.title ?? 'Elige una canción',
@@ -1997,17 +2595,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
       onToggleFavorite: track == null
           ? null
           : () => unawaited(_toggleFavorite(track)),
-      playerStateStream: _player.playerStateStream,
+      playingStream: _videoMode
+          ? _videoPlayer.stream.playing
+          : _audioPlayingStream,
+      initialPlaying: _videoMode
+          ? _videoPlayer.state.playing
+          : _player.playing,
       loading: _onlinePlaybackLoading,
-      onTogglePlayback: (playing) {
-        if (!hasTrack) {
-          unawaited(_importFolder());
-        } else if (playing) {
-          unawaited(_player.pause());
-        } else {
-          unawaited(_player.play());
-        }
-      },
+      onTogglePlayback: (playing) => hasTrack
+          ? unawaited(_toggleMiniPlayerPlayback(playing))
+          : unawaited(_importFolder()),
       shuffleEnabled: _player.shuffleModeEnabled,
       onToggleShuffle: onlineTrack == null
           ? () async {
@@ -2023,22 +2620,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
       },
       onPrevious: onlineTrack != null
           ? (_onlineQueueIndex > 0
-                ? () => unawaited(_skipOnlineTrack(-1))
+                ? () => unawaited(_skipMiniPlayerTrack(-1))
                 : null)
-          : (_queue.isEmpty ? null : () => unawaited(_player.seekToPrevious())),
+          : (_queue.isEmpty ? null : () => unawaited(_skipMiniPlayerTrack(-1))),
       onNext: onlineTrack != null
           ? (_onlineQueueIndex >= 0 &&
                     _onlineQueueIndex < _onlinePlaybackQueue.length - 1
-                ? () => unawaited(_skipOnlineTrack(1))
+                ? () => unawaited(_skipMiniPlayerTrack(1))
                 : null)
-          : (_queue.isEmpty ? null : () => unawaited(_player.seekToNext())),
-      position: _position,
+          : (_queue.isEmpty ? null : () => unawaited(_skipMiniPlayerTrack(1))),
+      position: position,
       duration: _duration,
-      positionLabel: _time(_position),
+      positionLabel: _time(position),
       durationLabel: _time(_duration),
       onSeek: !hasTrack || _duration == null
           ? null
-          : (position) => unawaited(_player.seek(position)),
+          : (position) => unawaited(_seekMiniPlayer(position)),
       volume: _volume,
       onVolumeChanged: (value) {
         setState(() => _volume = value);
@@ -2051,12 +2648,24 @@ class _LibraryScreenState extends State<LibraryScreen> {
       panelColor: _panel,
       accentColor: _cyan,
       mutedColor: _muted,
+      ),
     );
   }
 
   Widget _nowPlayingPanel(Track? track) {
     final onlineTrack = _playingOnlineTrack;
-    final artwork = track != null
+    final artwork = _videoMode
+        ? ClipRRect(
+            borderRadius: BorderRadius.circular(20),
+            child: RepaintBoundary(
+              child: media_video.Video(
+                controller: _videoController,
+                fit: BoxFit.contain,
+                controls: media_video.MaterialVideoControls,
+              ),
+            ),
+          )
+        : track != null
         ? _cover(track, 270)
         : onlineTrack != null
         ? ClipRRect(
@@ -2075,7 +2684,202 @@ class _LibraryScreenState extends State<LibraryScreen> {
       title: track?.title ?? onlineTrack?.title ?? 'Elige una canción',
       artist: track?.artist ?? onlineTrack?.artist ?? 'Tu biblioteca te espera',
       artwork: artwork,
+      audioPlaying: _player.playing,
+      audioActive: !_videoMode,
+      onAudioTap: () => unawaited(_switchToAudioMode()),
+      videoActive: _videoMode,
+      videoLoading: _videoLoading,
+      videoEnabled: onlineTrack?.directAudioUrl == null,
+      onVideoTap: onlineTrack?.directAudioUrl != null || _videoLoading
+          ? null
+          : () => unawaited(
+              _videoMode
+                  ? _switchToAudioMode()
+                  : _playVideoPreview(track, onlineTrack),
+            ),
     );
+  }
+
+  Future<void> _closeApp() async {
+    if (_closing) return;
+    _closing = true;
+    try {
+      await Future.wait([
+        _player.stop().timeout(const Duration(seconds: 2)),
+        _videoPlayer.stop().timeout(const Duration(seconds: 2)),
+      ]);
+    } catch (_) {
+      // A stalled player should not prevent the native window from closing.
+    } finally {
+      try {
+        await _windowChannel.invokeMethod<void>('close');
+      } catch (_) {
+        _closing = false;
+      }
+    }
+  }
+
+  Future<void> _switchToAudioMode() async {
+    _videoPlaybackRequestId++;
+    _videoLoading = false;
+    _videoAudioSyncTimer?.cancel();
+    _videoAudioSyncTimer = null;
+    if (_videoMode) {
+      await _videoPlayer.stop();
+      if (!mounted) return;
+      setState(() => _videoMode = false);
+    }
+    await _player.play();
+  }
+
+  Future<void> _playVideoPreview(
+    Track? track,
+    _OnlineTrack? onlineTrack,
+  ) async {
+    final requestId = ++_videoPlaybackRequestId;
+    if (mounted) setState(() => _videoLoading = true);
+    try {
+      String? videoId = onlineTrack?.videoId;
+      if (videoId == null && track != null) {
+        final resolved = await _resolveHomeChartTrack(
+          HomeChartTrack(
+            id: 'local:${track.path}',
+            title: track.title,
+            artist: track.artist,
+            artworkUrl: '',
+            rank: 0,
+          ),
+        );
+        videoId = resolved?.videoId;
+      }
+      if (videoId == null ||
+          videoId.isEmpty ||
+          videoId.startsWith('chart:') ||
+          videoId.startsWith('podcast:')) {
+        throw StateError('No hay un video asociado a esta pista.');
+      }
+      if (!mounted || requestId != _videoPlaybackRequestId) return;
+      dynamic selectedStream;
+      Object? lastVideoError;
+      Future<dynamic?> loadMuxedStream(String candidateId) async {
+        final manifest = await _youtube.videos.streamsClient
+            .getManifest(candidateId)
+            .timeout(const Duration(seconds: 18));
+        final streams = manifest.muxed.sortByVideoQuality();
+        if (streams.isEmpty) return null;
+        return streams.first;
+      }
+
+      try {
+        selectedStream = await loadMuxedStream(videoId);
+      } catch (error) {
+        lastVideoError = error;
+      }
+
+      if (selectedStream == null) {
+        final title = onlineTrack?.title ?? track?.title ?? '';
+        final artist = onlineTrack?.artist ?? track?.artist ?? '';
+        final query = '$title $artist audio oficial'.trim();
+        try {
+          final alternatives = await _youtube.search
+              .search(query)
+              .timeout(const Duration(seconds: 18));
+          final seenIds = <String>{videoId};
+          for (final candidate in alternatives) {
+            if (!mounted || requestId != _videoPlaybackRequestId) return;
+            if (!seenIds.add(candidate.id.value)) continue;
+            try {
+              selectedStream = await loadMuxedStream(candidate.id.value);
+              if (selectedStream != null) break;
+            } catch (error) {
+              lastVideoError = error;
+            }
+            if (seenIds.length >= 6) break;
+          }
+        } catch (error) {
+          lastVideoError = error;
+        }
+      }
+      if (selectedStream == null) {
+        throw StateError(
+          'No se encontró un video disponible para esta canción'
+          '${lastVideoError == null ? '.' : ': $lastVideoError'}',
+        );
+      }
+      if (!mounted || requestId != _videoPlaybackRequestId) return;
+      setState(() => _videoMode = true);
+      await WidgetsBinding.instance.endOfFrame;
+      if (!mounted || requestId != _videoPlaybackRequestId) return;
+      // The music player remains the audio source; the video player supplies
+      // pictures only, so the muxed YouTube audio cannot play over it.
+      // Mute before opening so a muxed stream can never leak its audio.
+      await _videoPlayer.setVolume(0);
+      if (!mounted || requestId != _videoPlaybackRequestId) return;
+      await _videoPlayer.open(
+        Media(
+          selectedStream.url.toString(),
+          httpHeaders: {
+            'User-Agent': _youtubeAndroidUserAgent,
+            'Accept': '*/*',
+            'Range': 'bytes=0-',
+          },
+        ),
+      );
+      await _videoPlayer.setVolume(0);
+      if (!mounted || requestId != _videoPlaybackRequestId) return;
+      // The video starts as soon as it opens. Seek the extracted audio to its
+      // actual current position, then keep it aligned while both play.
+      try {
+        await _player.seek(_videoPlayer.state.position);
+        await _player.play();
+        _startVideoAudioSync();
+      } catch (error, stackTrace) {
+        debugPrint('No se pudo sincronizar el audio extraído: $error');
+        debugPrintStack(stackTrace: stackTrace);
+        _toast('El video inició, pero no se pudo sincronizar el audio.');
+      }
+    } catch (error, stackTrace) {
+      if (requestId != _videoPlaybackRequestId) return;
+      debugPrint('No se pudo iniciar el modo video: $error');
+      debugPrintStack(stackTrace: stackTrace);
+      if (_videoMode) {
+        _videoAudioSyncTimer?.cancel();
+        await _videoPlayer.stop();
+      }
+      if (mounted) {
+        _toast('No se pudo iniciar el video: $error');
+      }
+    } finally {
+      if (mounted && requestId == _videoPlaybackRequestId) {
+        setState(() => _videoLoading = false);
+      }
+    }
+  }
+
+  void _startVideoAudioSync() {
+    _videoAudioSyncTimer?.cancel();
+    _videoAudioSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!_videoMode ||
+          !_videoPlayer.state.playing ||
+          _videoAudioSyncInProgress) {
+        return;
+      }
+      final videoPosition = _videoPlayer.state.position;
+      final audioPosition = _player.position;
+      if ((videoPosition - audioPosition).inMilliseconds.abs() < 250) return;
+      _videoAudioSyncInProgress = true;
+      unawaited(_correctVideoAudioDrift(videoPosition));
+    });
+  }
+
+  Future<void> _correctVideoAudioDrift(Duration videoPosition) async {
+    try {
+      await _player.seek(videoPosition);
+    } catch (error) {
+      debugPrint('Error al corregir sincronía de audio/video: $error');
+    } finally {
+      _videoAudioSyncInProgress = false;
+    }
   }
 
   Widget _settingsPanel() => Container(
