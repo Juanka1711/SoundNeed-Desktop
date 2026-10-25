@@ -398,8 +398,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       final lastPath = prefs.getString('lastTrack.v1');
       if (lastPath != null) {
         final index = _tracks.indexWhere((track) => track.path == lastPath);
-        if (index >= 0 && File(lastPath).existsSync())
+        if (index >= 0 && File(lastPath).existsSync()) {
           await _loadQueue(_tracks, startAt: index, autoplay: false);
+        }
       }
       await _pruneMissingTracks();
     } catch (error) {
@@ -447,8 +448,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
         XTypeGroup(label: 'Audio', extensions: _audioExtensions),
       ],
     );
-    if (files.isNotEmpty)
+    if (files.isNotEmpty) {
       await _indexPaths(files.map((file) => file.path).toList());
+    }
   }
 
   Future<void> _importFolder() async {
@@ -477,8 +479,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
       await _indexPaths(paths, alreadyScanning: true);
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(() => _error = 'No se pudo leer la carpeta: $error');
+      }
     } finally {
       if (mounted) setState(() => _scanning = false);
     }
@@ -518,8 +521,9 @@ class _LibraryScreenState extends State<LibraryScreen> {
           final coverFile = File(
             '${covers.path}${Platform.pathSeparator}$name',
           );
-          if (!await coverFile.exists())
+          if (!await coverFile.exists()) {
             await coverFile.writeAsBytes(bytes, flush: true);
+          }
           track = Track(
             path: track.path,
             title: track.title,
@@ -533,14 +537,16 @@ class _LibraryScreenState extends State<LibraryScreen> {
       }
       await _saveLibrary();
       if (mounted) setState(() {});
-      if (_currentIndex == null && _tracks.isNotEmpty)
+      if (_currentIndex == null && _tracks.isNotEmpty) {
         await _loadQueue(_tracks, startAt: _tracks.length - scanned.length);
+      }
       if (mounted) _toast('Se añadieron ${scanned.length} canciones.');
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(
           () => _error = 'No se pudieron importar algunos archivos: $error',
         );
+      }
     } finally {
       if (mounted && !alreadyScanning) setState(() => _scanning = false);
     }
@@ -548,20 +554,22 @@ class _LibraryScreenState extends State<LibraryScreen> {
 
   List<Track> get _visibleTracks {
     Iterable<Track> view = _tracks;
-    if (_section == 'Favoritos')
+    if (_section == 'Favoritos') {
       view = view.where((track) => _favorites.contains(track.path));
+    }
     if (_section == 'Playlists' && _playlistView != null) {
       final paths = _playlists[_playlistView] ?? const <String>[];
       view = view.where((track) => paths.contains(track.path));
     }
     final query = _query.trim().toLowerCase();
-    if (query.isNotEmpty)
+    if (query.isNotEmpty) {
       view = view.where(
         (track) =>
             track.title.toLowerCase().contains(query) ||
             track.artist.toLowerCase().contains(query) ||
             track.album.toLowerCase().contains(query),
       );
+    }
     return view.toList();
   }
 
@@ -614,11 +622,12 @@ class _LibraryScreenState extends State<LibraryScreen> {
         unawaited(_playVideoPreview(tracks[startAt], null));
       }
     } catch (error) {
-      if (mounted)
+      if (mounted) {
         setState(
           () => _error =
               'No se pudo abrir este archivo. Comprueba el formato y que siga disponible. ($error)',
         );
+      }
     }
   }
 
@@ -2761,7 +2770,7 @@ class _LibraryScreenState extends State<LibraryScreen> {
       if (!mounted || requestId != _videoPlaybackRequestId) return;
       dynamic selectedStream;
       Object? lastVideoError;
-      Future<dynamic?> loadMuxedStream(String candidateId) async {
+      Future<dynamic> loadMuxedStream(String candidateId) async {
         final manifest = await _youtube.videos.streamsClient
             .getManifest(candidateId)
             .timeout(const Duration(seconds: 18));
